@@ -31,6 +31,10 @@ function selectValue(options: SessionConfigOption[] | null | undefined, id: stri
   return options?.find((option) => option.id === id)?.currentValue;
 }
 
+function selectOption(options: SessionConfigOption[] | null | undefined, id: string) {
+  return options?.find((option) => option.id === id);
+}
+
 describe('DeepSeek Harness ACP adapter', () => {
   const disposers: Array<() => Promise<void>> = [];
 
@@ -94,7 +98,14 @@ describe('DeepSeek Harness ACP adapter', () => {
       },
       agentPresets: {
         defaultId: 'standard',
-        list: async () => DEEPSEEK_HARNESS_AGENT_PRESETS.map((preset) => ({ id: preset.value })),
+        list: async () => [
+          ...DEEPSEEK_HARNESS_AGENT_PRESETS.map((preset) => ({
+            id: preset.value,
+            name: `中文 ${preset.name}`,
+            description: `中文 ${preset.description}`,
+          })),
+          { id: 'custom', name: 'Custom preset', description: 'User-provided preset' },
+        ],
         mount: async (_agentContext, id = 'standard') => ({ id }),
         recompose: async (_agentContext, id) => {
           agentPresetSwitches.push(id);
@@ -138,6 +149,16 @@ describe('DeepSeek Harness ACP adapter', () => {
     expect(selectValue(created.configOptions, 'agent_preset')).toBe('standard');
     expect(selectValue(created.configOptions, 'model')).toBe('deepseek-v4-pro');
     expect(selectValue(created.configOptions, 'reasoning_effort')).toBe('max');
+    expect(selectOption(created.configOptions, 'agent_preset')).toMatchObject({
+      options: [
+        ...DEEPSEEK_HARNESS_AGENT_PRESETS.map((preset) => ({
+          value: preset.value,
+          name: preset.name,
+          description: preset.description,
+        })),
+        { value: 'custom', name: 'Custom preset', description: 'User-provided preset' },
+      ],
+    });
 
     const modelResponse = await client.setSessionConfigOption({
       sessionId: created.sessionId,
