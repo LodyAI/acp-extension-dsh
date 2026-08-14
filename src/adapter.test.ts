@@ -48,13 +48,18 @@ describe('DeepSeek Harness ACP adapter', () => {
     const context: Parameters<typeof apply>[0] = {
       agents: {
         async create(options) {
-          const agentContext = {
+          const agentContext: Parameters<typeof options.setup>[0] = {
             on<TArgs extends unknown[]>(
               event: string,
               listener: (...args: TArgs) => unknown
             ): () => void {
               scopedListeners.set(event, listener as Listener);
               return () => scopedListeners.delete(event);
+            },
+            plugin: () => ({ await: () => Promise.resolve() }),
+            loader: {
+              import: () => Promise.resolve({}),
+              unwrapExports: (exports) => exports,
             },
           };
           await options.setup(agentContext);
@@ -205,6 +210,179 @@ describe('DeepSeek Harness ACP adapter', () => {
     ).rejects.toThrow(/unknown model/u);
   });
 
+  it('mounts ACP MCP servers in the Agent scope and releases their namespaces on close', async () => {
+    type AdapterContext = Parameters<typeof apply>[0];
+    type TestAgent = NonNullable<ReturnType<AdapterContext['agents']['get']>>;
+
+    const streams = connectedStreams();
+    const mountedConfigs: Array<Record<string, unknown>> = [];
+    const disposedSessions: string[] = [];
+    const agents = new Map<string, TestAgent>();
+    const mcpClientPlugin = { apply: vi.fn() };
+    const importMcpClient = vi.fn(() => Promise.resolve(mcpClientPlugin));
+    let nextMcpMountFailure: Error | undefined;
+    const context: AdapterContext = {
+      agents: {
+        async create(options) {
+          const agentContext: Parameters<typeof options.setup>[0] = {
+            on: () => () => undefined,
+            plugin(_plugin, pluginConfig) {
+              mountedConfigs.push({ ...pluginConfig });
+              return {
+                await: async () => {
+                  const failure = nextMcpMountFailure;
+                  nextMcpMountFailure = undefined;
+                  if (failure) throw failure;
+                },
+              };
+            },
+            loader: {
+              import: importMcpClient,
+              unwrapExports: (exports) => exports,
+            },
+          };
+          await options.setup(agentContext);
+          const agent: TestAgent = {
+            id: options.sessionId,
+            ctx: agentContext,
+            session: {
+              id: options.sessionId,
+              header: { id: options.sessionId },
+              events: [],
+              append: vi.fn(),
+            },
+            followup: vi.fn(),
+            cancel: vi.fn(),
+            whenIdle: () => Promise.resolve(),
+          };
+          agents.set(agent.id, agent);
+          return {
+            agent,
+            dispose: async () => {
+              disposedSessions.push(agent.id);
+              agents.delete(agent.id);
+            },
+          };
+        },
+        get: (sessionId) => agents.get(sessionId),
+      },
+      permissionPresets: {
+        names: ['read-only', 'workspace-write', 'danger-full-access'],
+        defaultPreset: 'workspace-write',
+        current: () => 'workspace-write',
+        set: vi.fn(),
+      },
+      agentPresets: {
+        defaultId: 'standard',
+        list: async () => [{ id: 'standard' }],
+        mount: async (_agentContext, id = 'standard') => ({ id }),
+        recompose: async (_agentContext, id) => ({ id }),
+      },
+      logger: { warn: vi.fn() },
+      on: () => () => undefined,
+      get: () => undefined,
+      effect: (register) => {
+        disposers.push(register());
+      },
+    };
+
+    apply(context, { stream: streams.agent });
+    const client = new ClientSideConnection(
+      () => ({
+        requestPermission: async () => ({ outcome: { outcome: 'cancelled' as const } }),
+        sessionUpdate: async () => undefined,
+      }),
+      streams.client
+    );
+    const initialized = await client.initialize({
+      protocolVersion: PROTOCOL_VERSION,
+      clientCapabilities: {},
+    });
+    expect(initialized.agentCapabilities.mcpCapabilities).toEqual({ http: true });
+    expect(initialized.agentCapabilities.sessionCapabilities?.close).toEqual({});
+
+    const first = await client.newSession({
+      cwd: process.cwd(),
+      mcpServers: [
+        {
+          name: 'lody',
+          command: process.execPath,
+          args: ['lody-mcp.js'],
+          env: [{ name: 'LODY_MCP_SESSION_ID', value: 'session-1' }],
+        },
+        {
+          type: 'http',
+          name: 'remote tools',
+          url: 'https://mcp.example.test',
+          headers: [{ name: 'Authorization', value: 'Bearer test' }],
+        },
+      ],
+    });
+    expect(importMcpClient).toHaveBeenCalledWith('@deepseek-ai/dsh-mcp-client');
+    expect(mountedConfigs).toEqual([
+      {
+        transport: 'stdio',
+        serverName: 'lody',
+        command: process.execPath,
+        args: ['lody-mcp.js'],
+        env: { LODY_MCP_SESSION_ID: 'session-1' },
+        cwd: process.cwd(),
+        toolCallTimeoutMs: 60_000,
+        failOnStartupError: true,
+      },
+      {
+        transport: 'streamable-http',
+        serverName: expect.stringMatching(/^remote_tools_[a-f0-9]{8}$/u),
+        url: 'https://mcp.example.test',
+        headers: { Authorization: 'Bearer test' },
+        toolCallTimeoutMs: 60_000,
+        failOnStartupError: true,
+      },
+    ]);
+
+    await client.newSession({
+      cwd: process.cwd(),
+      mcpServers: [{ name: 'lody', command: process.execPath, args: [], env: [] }],
+    });
+    expect(mountedConfigs[2]?.serverName).toMatch(/^lody_[a-f0-9]{8}$/u);
+
+    await client.closeSession({ sessionId: first.sessionId });
+    expect(disposedSessions).toContain(first.sessionId);
+
+    await client.newSession({
+      cwd: process.cwd(),
+      mcpServers: [{ name: 'lody', command: process.execPath, args: [], env: [] }],
+    });
+    expect(mountedConfigs[3]?.serverName).toBe('lody');
+
+    await expect(
+      client.newSession({
+        cwd: process.cwd(),
+        mcpServers: [
+          {
+            type: 'sse',
+            name: 'legacy-sse',
+            url: 'https://mcp.example.test/sse',
+            headers: [],
+          },
+        ],
+      })
+    ).rejects.toThrow(/MCP transport sse is not supported/u);
+
+    nextMcpMountFailure = new Error('MCP startup failed');
+    await expect(
+      client.newSession({
+        cwd: process.cwd(),
+        mcpServers: [{ name: 'failing', command: process.execPath, args: [], env: [] }],
+      })
+    ).rejects.toThrow(/failed to create session: MCP startup failed/u);
+    await client.newSession({
+      cwd: process.cwd(),
+      mcpServers: [{ name: 'failing', command: process.execPath, args: [], env: [] }],
+    });
+    expect(mountedConfigs.at(-1)?.serverName).toBe('failing');
+  });
+
   it('rejects the active ACP prompt when Harness reports an error for its turn', async () => {
     type AdapterContext = Parameters<typeof apply>[0];
     type TestAgent = NonNullable<ReturnType<AdapterContext['agents']['get']>>;
@@ -222,7 +400,14 @@ describe('DeepSeek Harness ACP adapter', () => {
     const context: AdapterContext = {
       agents: {
         async create(options) {
-          const agentContext = { on: () => () => undefined };
+          const agentContext: Parameters<typeof options.setup>[0] = {
+            on: () => () => undefined,
+            plugin: () => ({ await: () => Promise.resolve() }),
+            loader: {
+              import: () => Promise.resolve({}),
+              unwrapExports: (exports) => exports,
+            },
+          };
           await options.setup(agentContext);
           createdAgent = {
             id: options.sessionId,

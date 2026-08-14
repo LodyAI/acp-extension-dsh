@@ -10,6 +10,7 @@ describe('DeepSeek Harness profile', () => {
       expect.arrayContaining([
         '@deepseek-ai/dsh-agent-presets',
         '@deepseek-ai/dsh-agent-tool-presentation',
+        '@deepseek-ai/dsh-mcp-client',
         '@deepseek-ai/dsh-tool-cordis',
         '@deepseek-ai/dsh-tool-bash-persistent',
       ])

@@ -6,7 +6,7 @@
  * behavior while adding standard ACP session controls backed by Harness's
  * per-agent model waterfall and permission-preset service.
  */
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { isAbsolute } from 'node:path';
 import { Readable, Writable } from 'node:stream';
 
@@ -18,8 +18,10 @@ import {
   type Agent as AcpAgent,
   type AuthenticateRequest,
   type CancelNotification,
+  type CloseSessionRequest,
   type InitializeRequest,
   type InitializeResponse,
+  type McpServer,
   type NewSessionRequest,
   type NewSessionResponse,
   type PromptRequest,
@@ -47,6 +49,7 @@ export const name = 'acp-extension-dsh';
 export const inject = [
   'agents',
   'agentPresets',
+  'loader',
   'permissionPresets',
   'sessionPersistence',
   'sessionQuery',
@@ -121,7 +124,40 @@ type HarnessUserMessage = {
 
 type HarnessAgentContext = {
   on<TArgs extends unknown[]>(event: string, listener: (...args: TArgs) => unknown): () => void;
+  plugin(plugin: HarnessPlugin, config: HarnessMcpClientConfig): HarnessPluginHandle;
+  loader: {
+    import(name: string): Promise<unknown>;
+    unwrapExports(exports: unknown): unknown;
+  };
 };
+
+type HarnessPlugin = {
+  apply(context: unknown, config: HarnessMcpClientConfig): unknown;
+};
+
+type HarnessPluginHandle = {
+  await(): Promise<unknown>;
+};
+
+type HarnessMcpClientConfig =
+  | {
+      transport: 'stdio';
+      serverName: string;
+      command: string;
+      args: string[];
+      env: Record<string, string>;
+      cwd: string;
+      toolCallTimeoutMs: number;
+      failOnStartupError: boolean;
+    }
+  | {
+      transport: 'streamable-http';
+      serverName: string;
+      url: string;
+      headers: Record<string, string>;
+      toolCallTimeoutMs: number;
+      failOnStartupError: boolean;
+    };
 
 type HarnessAgentHandle = {
   agent: HarnessAgent;
@@ -207,6 +243,11 @@ const MODEL_CONFIG_ID = 'model';
 const MODE_CONFIG_ID = 'mode';
 const REASONING_EFFORT_CONFIG_ID = 'reasoning_effort';
 const AGENT_PRESET_CONFIG_ID = 'agent_preset';
+const MCP_CLIENT_PACKAGE = '@deepseek-ai/dsh-mcp-client';
+const MCP_TOOL_CALL_TIMEOUT_MS = 60_000;
+const MCP_SERVER_NAME_MAX_LENGTH = 32;
+const MCP_SERVER_NAME_HASH_LENGTH = 8;
+const INVALID_MCP_SERVER_NAME_CHARS = /[^A-Za-z0-9_-]/gu;
 
 const MODEL_IDS = new Set<string>(DEEPSEEK_HARNESS_MODELS.map((model) => model.modelId));
 const PERMISSION_MODE_IDS = new Set<string>(
@@ -246,6 +287,115 @@ function resolveAdapterConfig(config: DeepSeekAcpAdapterConfig | undefined): Res
     reasoningEffort,
     ...(config?.stream ? { stream: config.stream } : {}),
   };
+}
+
+async function loadMcpClientPlugin(agentContext: HarnessAgentContext): Promise<HarnessPlugin> {
+  const module = agentContext.loader.unwrapExports(
+    await agentContext.loader.import(MCP_CLIENT_PACKAGE)
+  );
+  if (
+    typeof module !== 'object' ||
+    module === null ||
+    !('apply' in module) ||
+    typeof module.apply !== 'function'
+  ) {
+    throw new Error(`${MCP_CLIENT_PACKAGE} does not export a Cordis plugin`);
+  }
+  return module as HarnessPlugin;
+}
+
+function shortHash(value: string): string {
+  return createHash('sha256').update(value).digest('hex').slice(0, MCP_SERVER_NAME_HASH_LENGTH);
+}
+
+function normalizedMcpServerName(name: string, fallbackIndex: number): string {
+  const normalized = name.replace(INVALID_MCP_SERVER_NAME_CHARS, '_');
+  const base = normalized || `server_${fallbackIndex + 1}`;
+  if (base === name && base.length <= MCP_SERVER_NAME_MAX_LENGTH) return base;
+  const hash = shortHash(name);
+  return `${base.slice(0, MCP_SERVER_NAME_MAX_LENGTH - hash.length - 1)}_${hash}`;
+}
+
+function reserveMcpServerNames(
+  servers: readonly McpServer[],
+  sessionId: string,
+  activeNames: Set<string>
+): { names: string[]; release(): void } {
+  const names: string[] = [];
+  for (const [index, server] of servers.entries()) {
+    const base = normalizedMcpServerName(server.name, index);
+    let name = base;
+    let attempt = 0;
+    while (activeNames.has(name)) {
+      const suffix = shortHash(`${sessionId}\0${index}\0${attempt}`);
+      name = `${base.slice(0, MCP_SERVER_NAME_MAX_LENGTH - suffix.length - 1)}_${suffix}`;
+      attempt += 1;
+    }
+    activeNames.add(name);
+    names.push(name);
+  }
+
+  let released = false;
+  return {
+    names,
+    release() {
+      if (released) return;
+      released = true;
+      for (const name of names) activeNames.delete(name);
+    },
+  };
+}
+
+function entriesToRecord(
+  entries: readonly { name: string; value: string }[]
+): Record<string, string> {
+  return Object.fromEntries(entries.map(({ name, value }) => [name, value]));
+}
+
+function mcpClientConfig(
+  server: McpServer,
+  serverName: string,
+  cwd: string
+): HarnessMcpClientConfig {
+  if (!('type' in server)) {
+    return {
+      transport: 'stdio',
+      serverName,
+      command: server.command,
+      args: [...server.args],
+      env: entriesToRecord(server.env),
+      cwd,
+      toolCallTimeoutMs: MCP_TOOL_CALL_TIMEOUT_MS,
+      failOnStartupError: true,
+    };
+  }
+  if (server.type === 'http') {
+    return {
+      transport: 'streamable-http',
+      serverName,
+      url: server.url,
+      headers: entriesToRecord(server.headers),
+      toolCallTimeoutMs: MCP_TOOL_CALL_TIMEOUT_MS,
+      failOnStartupError: true,
+    };
+  }
+  throw invalidParams(`MCP transport ${server.type} is not supported`);
+}
+
+async function mountMcpServers(
+  agentContext: HarnessAgentContext,
+  servers: readonly McpServer[],
+  serverNames: readonly string[],
+  cwd: string
+): Promise<void> {
+  if (servers.length === 0) return;
+  const plugin = await loadMcpClientPlugin(agentContext);
+  const handles = servers.map((server, index) => {
+    const serverName = serverNames[index];
+    if (!serverName) throw new Error(`missing MCP namespace for server ${index}`);
+    return agentContext.plugin(plugin, mcpClientConfig(server, serverName, cwd));
+  });
+  await Promise.all(handles.map((handle) => handle.await()));
 }
 
 function cloneSelection(selection: ModelSelection): ModelSelection {
@@ -429,8 +579,10 @@ function validateSessionParams(params: NewSessionRequest): void {
   if (params.additionalDirectories && params.additionalDirectories.length > 0) {
     throw invalidParams('additionalDirectories is not supported');
   }
-  if (params.mcpServers.length > 0) {
-    throw invalidParams('mcpServers is not supported');
+  for (const server of params.mcpServers) {
+    if ('type' in server && server.type !== 'http') {
+      throw invalidParams(`MCP transport ${server.type} is not supported`);
+    }
   }
 }
 
@@ -451,6 +603,7 @@ function assertAllowed(value: string, allowed: ReadonlySet<string>, label: strin
 export function apply(ctx: HarnessContext, rawConfig?: DeepSeekAcpAdapterConfig): void {
   const config = resolveAdapterConfig(rawConfig);
   const sessions = new Map<string, SessionRecord>();
+  const activeMcpServerNames = new Set<string>();
   let closed = false;
   let conn: AgentSideConnection;
 
@@ -488,6 +641,31 @@ export function apply(ctx: HarnessContext, rawConfig?: DeepSeekAcpAdapterConfig)
     if (!inflight) return;
     record.inflight = undefined;
     inflight.resolve(reason);
+  };
+
+  const disposeRecords = async (records: readonly SessionRecord[]): Promise<void> => {
+    const subagents = ctx.get('subagents') as ContinuableDrain | undefined;
+    if (subagents) {
+      try {
+        await subagents.drainContinuableDescendants(records.map((record) => record.agent));
+      } catch (error: unknown) {
+        ctx.logger.warn(
+          `acp-extension-dsh: continuable subagent teardown failed: ${String(error)}`
+        );
+      }
+    }
+    const results = await Promise.allSettled(records.map((record) => record.dispose()));
+    const failures = results
+      .filter((result): result is PromiseRejectedResult => result.status === 'rejected')
+      .map((result) => result.reason as unknown);
+    if (failures.length > 0) {
+      throw new AggregateError(
+        failures,
+        `DeepSeek ACP teardown failed for ${failures.length} session(s): ${failures
+          .map(errorChain)
+          .join('; ')}`
+      );
+    }
   };
 
   ctx.on('session/event', (session: HarnessSession, event: HarnessSessionEvent) => {
@@ -636,6 +814,8 @@ export function apply(ctx: HarnessContext, rawConfig?: DeepSeekAcpAdapterConfig)
           agentInfo: { name: 'acp-extension-dsh', version: ACP_EXTENSION_DSH_VERSION },
           agentCapabilities: {
             promptCapabilities: { image: false, audio: false, embeddedContext: false },
+            mcpCapabilities: { http: true },
+            sessionCapabilities: { close: {} },
           },
           authMethods: [],
         });
@@ -665,25 +845,56 @@ export function apply(ctx: HarnessContext, rawConfig?: DeepSeekAcpAdapterConfig)
             `default agent preset ${JSON.stringify(requestedPreset)} is unavailable`
           );
         }
-        let mountedPreset = requestedPreset;
-        const handle = await ctx.agents.create({
+        const mcpServerNames = reserveMcpServerNames(
+          params.mcpServers,
           sessionId,
-          meta: { cwd: params.cwd, agentPreset: requestedPreset },
-          agentOptions: { provider: config.provider, model: config.model },
-          setup: async (agentContext) => {
-            installModelSelection(agentContext, selection);
-            mountedPreset = (await ctx.agentPresets.mount(agentContext, requestedPreset)).id;
-          },
-        });
+          activeMcpServerNames
+        );
+        let mountedPreset = requestedPreset;
+        let handle: HarnessAgentHandle;
+        try {
+          handle = await ctx.agents.create({
+            sessionId,
+            meta: { cwd: params.cwd, agentPreset: requestedPreset },
+            agentOptions: { provider: config.provider, model: config.model },
+            setup: async (agentContext) => {
+              installModelSelection(agentContext, selection);
+              mountedPreset = (await ctx.agentPresets.mount(agentContext, requestedPreset)).id;
+              await mountMcpServers(
+                agentContext,
+                params.mcpServers,
+                mcpServerNames.names,
+                params.cwd
+              );
+            },
+          });
+        } catch (error: unknown) {
+          mcpServerNames.release();
+          if (error instanceof RequestError) throw error;
+          throw internalError(`failed to create session: ${errorChain(error)}`);
+        }
+        const dispose = async (): Promise<void> => {
+          try {
+            await handle.dispose();
+          } finally {
+            mcpServerNames.release();
+          }
+        };
         if (closed) {
-          await handle.dispose();
+          await dispose();
           throw internalError('connection closed during session/new');
         }
-        const permissionMode = ctx.permissionPresets.current(handle.agent.session.events);
-        assertAllowed(permissionMode, PERMISSION_MODE_IDS, 'permission mode');
+        let permissionMode: string;
+        try {
+          permissionMode = ctx.permissionPresets.current(handle.agent.session.events);
+          assertAllowed(permissionMode, PERMISSION_MODE_IDS, 'permission mode');
+        } catch (error: unknown) {
+          await dispose();
+          throw error;
+        }
         const record: SessionRecord = {
           agent: handle.agent,
-          dispose: () => handle.dispose(),
+          dispose,
           selection,
           permissionMode,
           agentPreset: mountedPreset,
@@ -758,6 +969,14 @@ export function apply(ctx: HarnessContext, rawConfig?: DeepSeekAcpAdapterConfig)
         settlePrompt(record, 'cancelled');
         return Promise.resolve();
       },
+
+      async closeSession(params: CloseSessionRequest): Promise<void> {
+        const record = requireSession(params.sessionId);
+        sessions.delete(params.sessionId);
+        record.agent.cancel({ kind: 'user' });
+        settlePrompt(record, 'cancelled');
+        await disposeRecords([record]);
+      },
     };
   };
 
@@ -780,28 +999,7 @@ export function apply(ctx: HarnessContext, rawConfig?: DeepSeekAcpAdapterConfig)
       settlePrompt(record, 'cancelled');
     }
     quiescing = (async () => {
-      const subagents = ctx.get('subagents') as ContinuableDrain | undefined;
-      if (subagents) {
-        try {
-          await subagents.drainContinuableDescendants(records.map((record) => record.agent));
-        } catch (error: unknown) {
-          ctx.logger.warn(
-            `acp-extension-dsh: continuable subagent teardown failed: ${String(error)}`
-          );
-        }
-      }
-      const results = await Promise.allSettled(records.map((record) => record.dispose()));
-      const failures = results
-        .filter((result): result is PromiseRejectedResult => result.status === 'rejected')
-        .map((result) => result.reason as unknown);
-      if (failures.length > 0) {
-        throw new AggregateError(
-          failures,
-          `DeepSeek ACP teardown failed for ${failures.length} session(s): ${failures
-            .map(errorChain)
-            .join('; ')}`
-        );
-      }
+      await disposeRecords(records);
     })();
     return quiescing;
   };

@@ -67,6 +67,34 @@ type HarnessUserMessage = {
 };
 type HarnessAgentContext = {
     on<TArgs extends unknown[]>(event: string, listener: (...args: TArgs) => unknown): () => void;
+    plugin(plugin: HarnessPlugin, config: HarnessMcpClientConfig): HarnessPluginHandle;
+    loader: {
+        import(name: string): Promise<unknown>;
+        unwrapExports(exports: unknown): unknown;
+    };
+};
+type HarnessPlugin = {
+    apply(context: unknown, config: HarnessMcpClientConfig): unknown;
+};
+type HarnessPluginHandle = {
+    await(): Promise<unknown>;
+};
+type HarnessMcpClientConfig = {
+    transport: 'stdio';
+    serverName: string;
+    command: string;
+    args: string[];
+    env: Record<string, string>;
+    cwd: string;
+    toolCallTimeoutMs: number;
+    failOnStartupError: boolean;
+} | {
+    transport: 'streamable-http';
+    serverName: string;
+    url: string;
+    headers: Record<string, string>;
+    toolCallTimeoutMs: number;
+    failOnStartupError: boolean;
 };
 type HarnessAgentHandle = {
     agent: HarnessAgent;

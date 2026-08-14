@@ -6,7 +6,8 @@ Harness. Keep it usable without importing Lody packages.
 ## Ownership
 
 - `src/adapter.ts` owns ACP lifecycle, prompt streaming, model/reasoning changes,
-  permission-preset selection, and blank-session Agent preset composition.
+  permission-preset selection, blank-session Agent preset composition, and
+  session-scoped mounting of ACP stdio/HTTP servers through `dsh-mcp-client`.
 - `src/capabilities.ts` owns the selector vocabulary shared with host UIs.
 - `src/profile.ts` owns the pinned Harness version, explicit npx package closure,
   and ACP host-plane composition. `presets/` is the pinned copy of the official
@@ -18,6 +19,12 @@ Harness. Keep it usable without importing Lody packages.
 The profile and adapter must change together when a selector or Harness service
 contract changes. Credentials must remain in the host environment and must never
 be rendered into a generated profile.
+
+ACP MCP server names become Harness tool namespaces. Preserve an already-valid,
+available name; normalize invalid names and suffix concurrent collisions so two
+live ACP sessions cannot contend for the native client's process-global namespace.
+MCP plugin fibers belong to the Agent context and must settle before `session/new`
+returns, so failed startup cannot publish a session without its requested tools.
 
 ## Checks
 

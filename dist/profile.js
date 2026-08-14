@@ -42,6 +42,7 @@ export const DEEPSEEK_HARNESS_NPX_PACKAGES = [
     '@deepseek-ai/dsh-code-runtime-worker-thread',
     '@deepseek-ai/dsh-cordis-host-runner',
     '@deepseek-ai/dsh-agent-presets',
+    '@deepseek-ai/dsh-mcp-client',
     '@deepseek-ai/dsh-persona',
     '@deepseek-ai/dsh-agent-instructions',
     '@deepseek-ai/dsh-tool-bash',
