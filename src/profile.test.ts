@@ -1,28 +1,54 @@
+import { readFile } from 'node:fs/promises';
 import { describe, expect, it } from 'vitest';
 
-import {
-  ACP_EXTENSION_DSH_QUERY_PATH_ENV,
-  ACP_EXTENSION_DSH_SESSION_ROOT_ENV,
-  DEEPSEEK_HARNESS_NPX_PACKAGES,
-  createDeepSeekHarnessCordisConfig,
-} from './profile.js';
+import { DEEPSEEK_HARNESS_NPX_PACKAGES, createDeepSeekHarnessCordisConfig } from './profile.js';
 
 describe('DeepSeek Harness profile', () => {
-  it('pins the ACP entry first and composes the control dependencies', () => {
+  it('pins the explicit ACP host and Agent preset package closure', () => {
     expect(DEEPSEEK_HARNESS_NPX_PACKAGES[0]).toBe('@deepseek-ai/dsh-acp-demo');
-    expect(DEEPSEEK_HARNESS_NPX_PACKAGES).toContain('@deepseek-ai/dsh-llm-deepseek');
-    expect(DEEPSEEK_HARNESS_NPX_PACKAGES).toContain('@deepseek-ai/dsh-permission-presets');
+    expect(DEEPSEEK_HARNESS_NPX_PACKAGES).toEqual(
+      expect.arrayContaining([
+        '@deepseek-ai/dsh-agent-presets',
+        '@deepseek-ai/dsh-agent-tool-presentation',
+        '@deepseek-ai/dsh-tool-cordis',
+        '@deepseek-ai/dsh-tool-bash-persistent',
+      ])
+    );
+    expect(DEEPSEEK_HARNESS_NPX_PACKAGES).not.toContain('@deepseek-ai/dsh');
   });
 
-  it('generates a credential-free Cordis profile around the supplied adapter', () => {
-    const config = createDeepSeekHarnessCordisConfig('/opt/acp-extension-dsh.js');
+  it('generates a credential-free host composition around the adapter and preset root', () => {
+    const config = createDeepSeekHarnessCordisConfig(
+      '/opt/acp-extension-dsh.js',
+      '/opt/deepseek-agent-presets'
+    );
 
-    for (const packageName of DEEPSEEK_HARNESS_NPX_PACKAGES.slice(1)) {
-      expect(config).toContain(`name: '${packageName}'`);
-    }
-    expect(config).toContain(`process.env.${ACP_EXTENSION_DSH_SESSION_ROOT_ENV}`);
-    expect(config).toContain(`process.env.${ACP_EXTENSION_DSH_QUERY_PATH_ENV}`);
+    expect(config).toContain("name: '@deepseek-ai/dsh-agent-presets'");
+    expect(config).toContain('default: standard');
+    expect(config).toContain('path: "/opt/deepseek-agent-presets"');
+    expect(config).toContain("name: '@deepseek-ai/dsh-code-runtime-worker-thread'");
     expect(config).toContain('name: "/opt/acp-extension-dsh.js"');
-    expect(config).not.toMatch(/api[_-]?key/iu);
+    expect(config).not.toMatch(/api[_-]?key:\s+[^D\n]/iu);
+  });
+
+  it('installs every plugin referenced by the host and shipped Agent presets', async () => {
+    const sources = [
+      createDeepSeekHarnessCordisConfig('/opt/acp-extension-dsh.js', '/opt/presets'),
+      ...(await Promise.all(
+        ['standard', 'code', 'minimal', 'cordis'].map((presetId) =>
+          readFile(new URL(`../presets/${presetId}/agent.cordis.yml`, import.meta.url), 'utf8')
+        )
+      )),
+    ];
+    const installed = new Set<string>(DEEPSEEK_HARNESS_NPX_PACKAGES);
+
+    for (const source of sources) {
+      for (const match of source.matchAll(/name: '(@deepseek-ai\/[^']+)'/gu)) {
+        const specifier = match[1];
+        if (!specifier) continue;
+        const packageName = specifier.split('/').slice(0, 2).join('/');
+        expect(installed, `missing npx package for ${specifier}`).toContain(packageName);
+      }
+    }
   });
 });

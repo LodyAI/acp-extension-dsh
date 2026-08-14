@@ -6,10 +6,12 @@ Harness. Keep it usable without importing Lody packages.
 ## Ownership
 
 - `src/adapter.ts` owns ACP lifecycle, prompt streaming, model/reasoning changes,
-  and permission-preset selection.
+  permission-preset selection, and blank-session Agent preset composition.
 - `src/capabilities.ts` owns the selector vocabulary shared with host UIs.
-- `src/profile.ts` owns the pinned Harness version, exact plugin package list,
-  and Cordis coding profile.
+- `src/profile.ts` owns the pinned Harness version, explicit npx package closure,
+  and ACP host-plane composition. `presets/` is the pinned copy of the official
+  `standard`/`code`/`minimal`/`cordis` Agent presets; update it together with the
+  package list and retain the upstream notice.
 - Hosts own installation caches, data-directory selection, process supervision,
   credentials, and bundling.
 

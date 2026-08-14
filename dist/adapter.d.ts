@@ -31,6 +31,7 @@ type HarnessSessionEvent = {
         message?: {
             content: HarnessMessageBlock[];
         };
+        agentPreset?: string;
     };
 };
 type HarnessSession = {
@@ -39,9 +40,13 @@ type HarnessSession = {
         id: string;
     };
     events: readonly HarnessSessionEvent[];
+    append(type: 'agent-preset/selected', data: {
+        agentPreset: string;
+    }): void;
 };
 type HarnessAgent = {
     id: string;
+    ctx: HarnessAgentContext;
     session: HarnessSession;
     followup(message: HarnessUserMessage): void;
     cancel(cause: {
@@ -67,18 +72,25 @@ type HarnessAgentHandle = {
     agent: HarnessAgent;
     dispose(): Promise<void>;
 };
+type HarnessAgentPreset = {
+    id: string;
+    name?: string;
+    description?: string;
+    broken?: string;
+};
 type HarnessContext = {
     agents: {
         create(options: {
             sessionId: string;
             meta: {
                 cwd: string;
+                agentPreset: string;
             };
             agentOptions: {
                 provider: string;
                 model: string;
             };
-            setup(agentContext: HarnessAgentContext): void;
+            setup(agentContext: HarnessAgentContext): void | Promise<void>;
         }): Promise<HarnessAgentHandle>;
         get(sessionId: string): HarnessAgent | undefined;
     };
@@ -87,6 +99,12 @@ type HarnessContext = {
         defaultPreset: string;
         current(events: readonly HarnessSessionEvent[]): string;
         set(session: HarnessSession, name: string): void;
+    };
+    agentPresets: {
+        defaultId: string;
+        list(): Promise<HarnessAgentPreset[]>;
+        mount(agentContext: HarnessAgentContext, id?: string): Promise<HarnessAgentPreset>;
+        recompose(agentContext: HarnessAgentContext, id: string): Promise<HarnessAgentPreset>;
     };
     logger: {
         warn(message: string): void;

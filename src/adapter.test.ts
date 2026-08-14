@@ -8,6 +8,7 @@ import {
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { apply } from './adapter.js';
+import { DEEPSEEK_HARNESS_AGENT_PRESETS } from './capabilities.js';
 
 type Listener = (...args: unknown[]) => unknown;
 
@@ -41,12 +42,13 @@ describe('DeepSeek Harness ACP adapter', () => {
     const streams = connectedStreams();
     const scopedListeners = new Map<string, Listener>();
     const permissionSwitches: string[] = [];
+    const agentPresetSwitches: string[] = [];
     let currentPermission = 'workspace-write';
 
     const context: Parameters<typeof apply>[0] = {
       agents: {
         async create(options) {
-          options.setup({
+          const agentContext = {
             on<TArgs extends unknown[]>(
               event: string,
               listener: (...args: TArgs) => unknown
@@ -54,14 +56,19 @@ describe('DeepSeek Harness ACP adapter', () => {
               scopedListeners.set(event, listener as Listener);
               return () => scopedListeners.delete(event);
             },
-          });
+          };
+          await options.setup(agentContext);
           const session = {
             id: options.sessionId,
             header: { id: options.sessionId },
-            events: [],
+            events: [] as Array<{ type: string; data: { agentPreset: string } }>,
+            append(type: 'agent-preset/selected', data: { agentPreset: string }) {
+              this.events.push({ type, data });
+            },
           };
           const agent = {
             id: options.sessionId,
+            ctx: agentContext,
             session,
             followup: vi.fn(),
             cancel: vi.fn(),
@@ -78,6 +85,15 @@ describe('DeepSeek Harness ACP adapter', () => {
         set: (_session, mode) => {
           currentPermission = mode;
           permissionSwitches.push(mode);
+        },
+      },
+      agentPresets: {
+        defaultId: 'standard',
+        list: async () => DEEPSEEK_HARNESS_AGENT_PRESETS.map((preset) => ({ id: preset.value })),
+        mount: async (_agentContext, id = 'standard') => ({ id }),
+        recompose: async (_agentContext, id) => {
+          agentPresetSwitches.push(id);
+          return { id };
         },
       },
       logger: { warn: vi.fn() },
@@ -114,6 +130,7 @@ describe('DeepSeek Harness ACP adapter', () => {
 
     const created = await client.newSession({ cwd: process.cwd(), mcpServers: [] });
     expect(created.modes?.currentModeId).toBe('workspace-write');
+    expect(selectValue(created.configOptions, 'agent_preset')).toBe('standard');
     expect(selectValue(created.configOptions, 'model')).toBe('deepseek-v4-pro');
     expect(selectValue(created.configOptions, 'reasoning_effort')).toBe('max');
 
@@ -138,6 +155,14 @@ describe('DeepSeek Harness ACP adapter', () => {
     });
     expect(selectValue(modeResponse.configOptions, 'mode')).toBe('danger-full-access');
     expect(permissionSwitches).toEqual(['danger-full-access']);
+
+    const presetResponse = await client.setSessionConfigOption({
+      sessionId: created.sessionId,
+      configId: 'agent_preset',
+      value: 'minimal',
+    });
+    expect(selectValue(presetResponse.configOptions, 'agent_preset')).toBe('minimal');
+    expect(agentPresetSwitches).toEqual(['minimal']);
 
     const assemblyListener = scopedListeners.get('system-prompt/assemble') as
       | ((
@@ -197,13 +222,16 @@ describe('DeepSeek Harness ACP adapter', () => {
     const context: AdapterContext = {
       agents: {
         async create(options) {
-          options.setup({ on: () => () => undefined });
+          const agentContext = { on: () => () => undefined };
+          await options.setup(agentContext);
           createdAgent = {
             id: options.sessionId,
+            ctx: agentContext,
             session: {
               id: options.sessionId,
               header: { id: options.sessionId },
               events: [],
+              append: vi.fn(),
             },
             followup(message) {
               queuedMessage = message;
@@ -221,6 +249,12 @@ describe('DeepSeek Harness ACP adapter', () => {
         defaultPreset: 'workspace-write',
         current: () => 'workspace-write',
         set: vi.fn(),
+      },
+      agentPresets: {
+        defaultId: 'standard',
+        list: async () => [{ id: 'standard' }, { id: 'minimal' }],
+        mount: async (_agentContext, id = 'standard') => ({ id }),
+        recompose: async (_agentContext, id) => ({ id }),
       },
       logger: { warn: vi.fn() },
       on<TArgs extends unknown[]>(
@@ -252,6 +286,13 @@ describe('DeepSeek Harness ACP adapter', () => {
     });
 
     await queued;
+    await expect(
+      client.setSessionConfigOption({
+        sessionId: session.sessionId,
+        configId: 'agent_preset',
+        value: 'minimal',
+      })
+    ).rejects.toThrow(/fixed after the session has started/u);
     if (!createdAgent || !queuedMessage) throw new Error('prompt was not queued');
     const inboxClaimed = globalListeners.get('agent/inbox/claimed');
     const agentError = globalListeners.get('agent/error');

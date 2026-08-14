@@ -35,3 +35,30 @@ export const DEEPSEEK_HARNESS_REASONING_OPTIONS = [
   { value: 'high', name: 'High', description: 'Use the standard reasoning budget' },
   { value: 'max', name: 'Max', description: 'Use the maximum reasoning budget' },
 ] as const;
+
+/** Built-in agent compositions shipped by the official DeepSeek Harness CLI. */
+export const DEEPSEEK_HARNESS_AGENT_PRESETS = [
+  {
+    value: 'standard',
+    name: 'Standard mode',
+    description:
+      'Full coding agent with file editing, shell, search, skills, planning, goals, subagents, and workflows.',
+  },
+  {
+    value: 'code',
+    name: 'PTC mode',
+    description:
+      'Standard capabilities exposed through the Code Mode SDK for multi-step TypeScript programs.',
+  },
+  {
+    value: 'minimal',
+    name: 'Minimal mode',
+    description: 'Two-tool coding agent with persistent bash and str_replace_editor.',
+  },
+  {
+    value: 'cordis',
+    name: 'Creator mode',
+    description:
+      'Standard capabilities plus runtime inspection, plugin experiments, and preset-authoring guidance.',
+  },
+] as const;

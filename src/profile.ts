@@ -1,13 +1,16 @@
 export const ACP_EXTENSION_DSH_VERSION = '0.1.0';
 export const DEEPSEEK_HARNESS_VERSION = '0.1.0-rc.6';
-export const ACP_EXTENSION_DSH_PROFILE_REVISION = 'v1';
+export const ACP_EXTENSION_DSH_PROFILE_REVISION = 'v2';
 export const ACP_EXTENSION_DSH_SESSION_ROOT_ENV = 'ACP_EXTENSION_DSH_SESSION_ROOT';
 export const ACP_EXTENSION_DSH_QUERY_PATH_ENV = 'ACP_EXTENSION_DSH_QUERY_PATH';
 
 export const ACP_EXTENSION_DSH_CAPABILITY_SOURCE_VERSION = `acp-extension-dsh@${ACP_EXTENSION_DSH_VERSION}:dsh@${DEEPSEEK_HARNESS_VERSION}:profile-${ACP_EXTENSION_DSH_PROFILE_REVISION}`;
 
-// Keep the ACP entry package first. Hosts can use the first --package spec to
-// inspect and repair multi-package npx installs.
+// Keep the ACP entry package first. Hosts use its binary to launch the explicit
+// composition below. The official all-in-one CLI is deliberately not installed:
+// its telemetry dependency is not required by ACP and currently has no matching
+// published OpenTelemetry release. Every package used by the host plane or one
+// of the four shipped Agent presets is pinned to the same Harness release.
 export const DEEPSEEK_HARNESS_NPX_PACKAGES = [
   '@deepseek-ai/dsh-acp-demo',
   '@deepseek-ai/dsh-agent-spine-demo',
@@ -19,31 +22,78 @@ export const DEEPSEEK_HARNESS_NPX_PACKAGES = [
   '@deepseek-ai/dsh-sandbox-policy',
   '@deepseek-ai/dsh-subprocess-local',
   '@deepseek-ai/dsh-bash-sandbox',
+  '@deepseek-ai/dsh-pwsh-sandbox',
   '@deepseek-ai/dsh-user-approval',
   '@deepseek-ai/dsh-permission-presets',
   '@deepseek-ai/dsh-token-meter',
-  '@deepseek-ai/dsh-compaction-basic',
   '@deepseek-ai/dsh-fs-sandbox',
   '@deepseek-ai/dsh-fs-observation-policy',
+  '@deepseek-ai/dsh-shell-env',
+  '@deepseek-ai/dsh-commands',
+  '@deepseek-ai/dsh-skill',
+  '@deepseek-ai/dsh-goal',
+  '@deepseek-ai/dsh-goal-round-driver',
+  '@deepseek-ai/dsh-user-questions',
+  '@deepseek-ai/dsh-session-projection',
+  '@deepseek-ai/dsh-subagent',
+  '@deepseek-ai/dsh-subagent-spawn-in-process',
+  '@deepseek-ai/dsh-subagent-fork-in-process',
+  '@deepseek-ai/dsh-tool-subagent-report',
+  '@deepseek-ai/dsh-web',
+  '@deepseek-ai/dsh-web-search-deepseek',
+  '@deepseek-ai/dsh-code-runtime-worker-thread',
+  '@deepseek-ai/dsh-cordis-host-runner',
+  '@deepseek-ai/dsh-agent-presets',
+  '@deepseek-ai/dsh-persona',
+  '@deepseek-ai/dsh-agent-instructions',
+  '@deepseek-ai/dsh-tool-bash',
+  '@deepseek-ai/dsh-tool-pwsh',
   '@deepseek-ai/dsh-tool-fs',
+  '@deepseek-ai/dsh-tool-fs-search',
+  '@deepseek-ai/dsh-tool-jobs',
+  '@deepseek-ai/dsh-tool-goal',
+  '@deepseek-ai/dsh-plan-mode',
+  '@deepseek-ai/dsh-compaction-basic',
+  '@deepseek-ai/dsh-command-compact',
+  '@deepseek-ai/dsh-compaction-tool-result-pruner',
+  '@deepseek-ai/dsh-tool-subagent-control',
+  '@deepseek-ai/dsh-tool-subagent',
+  '@deepseek-ai/dsh-workflow-worker-thread',
+  '@deepseek-ai/dsh-tool-workflow',
+  '@deepseek-ai/dsh-tool-ralph',
+  '@deepseek-ai/dsh-tool-ask-user',
+  '@deepseek-ai/dsh-tool-todo',
+  '@deepseek-ai/dsh-tool-web',
+  '@deepseek-ai/dsh-skill-filesystem',
+  '@deepseek-ai/dsh-tool-skill',
+  '@deepseek-ai/dsh-agent-tool-presentation',
+  '@deepseek-ai/dsh-tool-cordis',
+  '@deepseek-ai/dsh-terminal',
+  '@deepseek-ai/dsh-terminal-bash',
+  '@deepseek-ai/dsh-tool-bash-persistent',
+  '@deepseek-ai/dsh-fs-local',
+  '@deepseek-ai/dsh-tool-str-replace-editor',
 ] as const;
 
-/** Build the immutable Cordis coding profile consumed by dsh-acp-demo. */
-export function createDeepSeekHarnessCordisConfig(adapterPath: string): string {
+/**
+ * Build the immutable ACP host composition consumed by dsh-acp-demo.
+ *
+ * Registries, persistence, policy, and execution backends live on the host
+ * plane. Model-facing tools and prompt sections are mounted per Agent from the
+ * official preset files rooted at `presetRoot`.
+ */
+export function createDeepSeekHarnessCordisConfig(adapterPath: string, presetRoot: string): string {
   return `# Generated for acp-extension-dsh. API credentials stay in the host environment.
 - id: agent-spine
   name: '@deepseek-ai/dsh-agent-spine-demo'
   config:
-    workspaceContext:
-      maxBytes: 65536
+    workspaceContext: false
     skills:
       enabled: false
+    toolBash: false
     toolJobs: false
     goals: false
-    persona: |
-      You are a coding assistant powered by the {{model}} model. Your working directory is {{cwd}}.
-
-      Verify your work by running the relevant code or tests. Keep answers brief and factual.
+    persona: ''
 
 - id: session-persistence
   name: '@deepseek-ai/dsh-session-persistence-jsonl'
@@ -82,8 +132,13 @@ export function createDeepSeekHarnessCordisConfig(adapterPath: string): string {
 
 - id: bash
   name: '@deepseek-ai/dsh-bash-sandbox'
+  disabled: !!js process.platform === 'win32'
   config:
     timeoutMs: 60000
+
+- id: pwsh
+  name: '@deepseek-ai/dsh-pwsh-sandbox'
+  disabled: !!js process.platform !== 'win32'
 
 - id: approval
   name: '@deepseek-ai/dsh-user-approval'
@@ -111,23 +166,12 @@ export function createDeepSeekHarnessCordisConfig(adapterPath: string): string {
         name: Full access
         description: Allow unrestricted file and command access without approval prompts.
 
-- id: acp-agent
-  name: ${JSON.stringify(adapterPath)}
-  config:
-    provider: deepseek-official
-    model: deepseek-v4-pro
-    reasoningEffort: max
+# Host-plane services shared by every per-session preset.
+- id: shell-env
+  name: '@deepseek-ai/dsh-shell-env'
 
-- id: token-meter
-  name: '@deepseek-ai/dsh-token-meter'
-
-- id: compaction-basic
-  name: '@deepseek-ai/dsh-compaction-basic'
-  config:
-    thresholdRatio: 0.8
-    retainRatio: 0.08
-    maxTokens: 8192
-    compactionRetries: 1
+- id: commands
+  name: '@deepseek-ai/dsh-commands'
 
 - id: fs-sandbox
   name: '@deepseek-ai/dsh-fs-sandbox'
@@ -137,7 +181,71 @@ export function createDeepSeekHarnessCordisConfig(adapterPath: string): string {
 - id: fs-observation-policy
   name: '@deepseek-ai/dsh-fs-observation-policy'
 
-- id: tool-fs
-  name: '@deepseek-ai/dsh-tool-fs'
+- id: skill
+  name: '@deepseek-ai/dsh-skill'
+
+- id: goal
+  name: '@deepseek-ai/dsh-goal'
+
+- id: goal-round-driver
+  name: '@deepseek-ai/dsh-goal-round-driver'
+
+- id: user-questions
+  name: '@deepseek-ai/dsh-user-questions'
+
+- id: session-projection
+  name: '@deepseek-ai/dsh-session-projection'
+
+- id: subagent
+  name: '@deepseek-ai/dsh-subagent'
+
+- id: subagent-spawn-in-process
+  name: '@deepseek-ai/dsh-subagent-spawn-in-process'
+  config:
+    providerName: spawn
+
+- id: subagent-fork-in-process
+  name: '@deepseek-ai/dsh-subagent-fork-in-process'
+  config:
+    providerName: fork
+
+- id: tool-subagent-report
+  name: '@deepseek-ai/dsh-tool-subagent-report'
+
+- id: web
+  name: '@deepseek-ai/dsh-web'
+  config:
+    searchProvider: deepseek-official
+
+- id: web-search-deepseek
+  name: '@deepseek-ai/dsh-web-search-deepseek'
+  config:
+    apiKeyEnv: DEEPSEEK_API_KEY
+
+- id: code-runtime
+  name: '@deepseek-ai/dsh-code-runtime-worker-thread'
+
+- id: cordis-host-runner
+  name: '@deepseek-ai/dsh-cordis-host-runner'
+
+- id: token-meter
+  name: '@deepseek-ai/dsh-token-meter'
+
+# The shipped root supplies the four official modes. AgentPresets also appends
+# $DSH_HOME/.agent-presets so user-authored DSH compositions remain available.
+- id: agent-presets
+  name: '@deepseek-ai/dsh-agent-presets'
+  config:
+    default: standard
+    roots:
+      - path: ${JSON.stringify(presetRoot)}
+        trust: system
+
+- id: acp-agent
+  name: ${JSON.stringify(adapterPath)}
+  config:
+    provider: deepseek-official
+    model: deepseek-v4-pro
+    reasoningEffort: max
 `;
 }

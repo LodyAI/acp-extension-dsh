@@ -21,8 +21,10 @@
   },
   "files": [
     "dist",
+    "presets",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "THIRD_PARTY_NOTICES.md"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",

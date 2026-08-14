@@ -10,15 +10,22 @@ import { randomUUID } from 'node:crypto';
 import { isAbsolute } from 'node:path';
 import { Readable, Writable } from 'node:stream';
 import { AgentSideConnection, ndJsonStream, PROTOCOL_VERSION, RequestError, } from '@agentclientprotocol/sdk';
-import { DEEPSEEK_HARNESS_MODELS, DEEPSEEK_HARNESS_PERMISSION_MODES, DEEPSEEK_HARNESS_REASONING_OPTIONS, } from './capabilities.js';
+import { DEEPSEEK_HARNESS_AGENT_PRESETS, DEEPSEEK_HARNESS_MODELS, DEEPSEEK_HARNESS_PERMISSION_MODES, DEEPSEEK_HARNESS_REASONING_OPTIONS, } from './capabilities.js';
 import { ACP_EXTENSION_DSH_VERSION } from './profile.js';
 export const name = 'acp-extension-dsh';
 // Waiting for persistence/query also preserves the upstream composite's
 // startup boundary: ACP cannot accept a session until durability is ready.
-export const inject = ['agents', 'permissionPresets', 'sessionPersistence', 'sessionQuery'];
+export const inject = [
+    'agents',
+    'agentPresets',
+    'permissionPresets',
+    'sessionPersistence',
+    'sessionQuery',
+];
 const MODEL_CONFIG_ID = 'model';
 const MODE_CONFIG_ID = 'mode';
 const REASONING_EFFORT_CONFIG_ID = 'reasoning_effort';
+const AGENT_PRESET_CONFIG_ID = 'agent_preset';
 const MODEL_IDS = new Set(DEEPSEEK_HARNESS_MODELS.map((model) => model.modelId));
 const PERMISSION_MODE_IDS = new Set(DEEPSEEK_HARNESS_PERMISSION_MODES.map((mode) => mode.id));
 const REASONING_EFFORT_IDS = new Set(DEEPSEEK_HARNESS_REASONING_OPTIONS.map((effort) => effort.value));
@@ -91,6 +98,22 @@ function configOptions(record) {
                 name: mode.name,
                 description: mode.description ?? null,
             })),
+        },
+        {
+            id: AGENT_PRESET_CONFIG_ID,
+            name: 'Agent preset',
+            description: 'Tools, prompt, and capabilities composed for the session',
+            category: 'agent_preset',
+            type: 'select',
+            currentValue: record.agentPreset,
+            options: record.agentPresetOptions.map((preset) => {
+                const builtIn = DEEPSEEK_HARNESS_AGENT_PRESETS.find((candidate) => candidate.value === preset.id);
+                return {
+                    value: preset.id,
+                    name: preset.name ?? builtIn?.name ?? preset.id,
+                    description: preset.description ?? builtIn?.description ?? null,
+                };
+            }),
         },
         {
             id: MODEL_CONFIG_ID,
@@ -338,6 +361,27 @@ export function apply(ctx, rawConfig) {
         if (params.configId === MODE_CONFIG_ID) {
             setPermissionMode(record, value);
         }
+        else if (params.configId === AGENT_PRESET_CONFIG_ID) {
+            const available = new Set(record.agentPresetOptions.map((preset) => preset.id));
+            assertAllowed(value, available, 'agent preset');
+            if (value === record.agentPreset)
+                return { configOptions: configOptions(record) };
+            if (record.started) {
+                throw invalidParams('agent preset is fixed after the session has started');
+            }
+            return ctx.agentPresets
+                .recompose(record.agent.ctx, value)
+                .then((preset) => {
+                record.agent.session.append('agent-preset/selected', { agentPreset: preset.id });
+                record.agentPreset = preset.id;
+                return { configOptions: configOptions(record) };
+            })
+                .catch((error) => {
+                if (error instanceof RequestError)
+                    throw error;
+                throw invalidParams(`failed to select agent preset ${JSON.stringify(value)}: ${errorChain(error)}`);
+            });
+        }
         else if (params.configId === MODEL_CONFIG_ID) {
             assertAllowed(value, MODEL_IDS, 'model');
             record.selection.current = { ...record.selection.current, model: value };
@@ -381,11 +425,20 @@ export function apply(ctx, rawConfig) {
                         reasoningEffort: config.reasoningEffort,
                     },
                 };
+                const agentPresetOptions = (await ctx.agentPresets.list()).filter((preset) => preset.broken === undefined);
+                const requestedPreset = ctx.agentPresets.defaultId;
+                if (!agentPresetOptions.some((preset) => preset.id === requestedPreset)) {
+                    throw internalError(`default agent preset ${JSON.stringify(requestedPreset)} is unavailable`);
+                }
+                let mountedPreset = requestedPreset;
                 const handle = await ctx.agents.create({
                     sessionId,
-                    meta: { cwd: params.cwd },
+                    meta: { cwd: params.cwd, agentPreset: requestedPreset },
                     agentOptions: { provider: config.provider, model: config.model },
-                    setup: (agentContext) => installModelSelection(agentContext, selection),
+                    setup: async (agentContext) => {
+                        installModelSelection(agentContext, selection);
+                        mountedPreset = (await ctx.agentPresets.mount(agentContext, requestedPreset)).id;
+                    },
                 });
                 if (closed) {
                     await handle.dispose();
@@ -398,6 +451,9 @@ export function apply(ctx, rawConfig) {
                     dispose: () => handle.dispose(),
                     selection,
                     permissionMode,
+                    agentPreset: mountedPreset,
+                    agentPresetOptions,
+                    started: false,
                 };
                 sessions.set(sessionId, record);
                 return {
@@ -428,6 +484,7 @@ export function apply(ctx, rawConfig) {
                     throw internalError('prompt was not queued: the agent was disposed outside the bridge');
                 }
                 const message = createUserMessage(text);
+                record.started = true;
                 const stopReason = await new Promise((resolve, reject) => {
                     const inflight = { resolve, reject, messageId: message.id };
                     record.inflight = inflight;
@@ -436,6 +493,7 @@ export function apply(ctx, rawConfig) {
                     }
                     catch (error) {
                         record.inflight = undefined;
+                        record.started = false;
                         throw internalError(`prompt was not queued: ${error instanceof Error ? error.message : String(error)}`);
                     }
                     void record.agent.whenIdle().then(() => {
