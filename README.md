@@ -23,6 +23,13 @@ Harness mounts the selected preset per session and also discovers user presets
 below `$DSH_HOME/.agent-presets`. MCP tools use Harness's native
 `mcp__<server>__<tool>` naming and are removed with their owning ACP session.
 
+The generated profile defaults session persistence to upstream's `zstd`
+encoding. A host that reuses an existing Harness session root may pass `none`
+to the profile builder only after verifying that the root contains raw
+`session.jsonl` artifacts and no `session.jsonl.zstd` artifacts. Harness roots
+are single-encoding stores: hosts must refuse mixed roots without moving,
+rewriting, or deleting user artifacts.
+
 ## Development
 
 ```sh

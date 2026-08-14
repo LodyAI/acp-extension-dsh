@@ -1,8 +1,9 @@
 export const ACP_EXTENSION_DSH_VERSION = '0.1.0';
 export const DEEPSEEK_HARNESS_VERSION = '0.1.0-rc.6';
-export const ACP_EXTENSION_DSH_PROFILE_REVISION = 'v2';
+export const ACP_EXTENSION_DSH_PROFILE_REVISION = 'v3';
 export const ACP_EXTENSION_DSH_SESSION_ROOT_ENV = 'ACP_EXTENSION_DSH_SESSION_ROOT';
 export const ACP_EXTENSION_DSH_QUERY_PATH_ENV = 'ACP_EXTENSION_DSH_QUERY_PATH';
+export const DEEPSEEK_HARNESS_DEFAULT_SESSION_COMPRESSION = 'zstd';
 export const ACP_EXTENSION_DSH_CAPABILITY_SOURCE_VERSION = `acp-extension-dsh@${ACP_EXTENSION_DSH_VERSION}:dsh@${DEEPSEEK_HARNESS_VERSION}:profile-${ACP_EXTENSION_DSH_PROFILE_REVISION}`;
 // Keep the ACP entry package first. Hosts use its binary to launch the explicit
 // composition below. The official all-in-one CLI is deliberately not installed:
@@ -80,7 +81,7 @@ export const DEEPSEEK_HARNESS_NPX_PACKAGES = [
  * plane. Model-facing tools and prompt sections are mounted per Agent from the
  * official preset files rooted at `presetRoot`.
  */
-export function createDeepSeekHarnessCordisConfig(adapterPath, presetRoot) {
+export function createDeepSeekHarnessCordisConfig(adapterPath, presetRoot, sessionCompression = DEEPSEEK_HARNESS_DEFAULT_SESSION_COMPRESSION) {
     return `# Generated for acp-extension-dsh. API credentials stay in the host environment.
 - id: agent-spine
   name: '@deepseek-ai/dsh-agent-spine-demo'
@@ -97,7 +98,7 @@ export function createDeepSeekHarnessCordisConfig(adapterPath, presetRoot) {
   name: '@deepseek-ai/dsh-session-persistence-jsonl'
   config:
     root: !!js process.env.${ACP_EXTENSION_DSH_SESSION_ROOT_ENV}
-    compression: none
+    compression: ${sessionCompression}
 
 - id: session-checkpoint
   name: '@deepseek-ai/dsh-session-checkpoint-policy'
