@@ -74,27 +74,27 @@ async function loadMcpClientPlugin(agentContext) {
 function shortHash(value) {
     return createHash('sha256').update(value).digest('hex').slice(0, MCP_SERVER_NAME_HASH_LENGTH);
 }
-function normalizedMcpServerName(name, fallbackIndex) {
-    const normalized = name.replace(INVALID_MCP_SERVER_NAME_CHARS, '_');
+function normalizedMcpServerName(serverName, fallbackIndex) {
+    const normalized = serverName.replace(INVALID_MCP_SERVER_NAME_CHARS, '_');
     const base = normalized || `server_${fallbackIndex + 1}`;
-    if (base === name && base.length <= MCP_SERVER_NAME_MAX_LENGTH)
+    if (base === serverName && base.length <= MCP_SERVER_NAME_MAX_LENGTH)
         return base;
-    const hash = shortHash(name);
+    const hash = shortHash(serverName);
     return `${base.slice(0, MCP_SERVER_NAME_MAX_LENGTH - hash.length - 1)}_${hash}`;
 }
 function reserveMcpServerNames(servers, sessionId, activeNames) {
     const names = [];
     for (const [index, server] of servers.entries()) {
         const base = normalizedMcpServerName(server.name, index);
-        let name = base;
+        let reservedName = base;
         let attempt = 0;
-        while (activeNames.has(name)) {
+        while (activeNames.has(reservedName)) {
             const suffix = shortHash(`${sessionId}\0${index}\0${attempt}`);
-            name = `${base.slice(0, MCP_SERVER_NAME_MAX_LENGTH - suffix.length - 1)}_${suffix}`;
+            reservedName = `${base.slice(0, MCP_SERVER_NAME_MAX_LENGTH - suffix.length - 1)}_${suffix}`;
             attempt += 1;
         }
-        activeNames.add(name);
-        names.push(name);
+        activeNames.add(reservedName);
+        names.push(reservedName);
     }
     let released = false;
     return {
@@ -103,13 +103,13 @@ function reserveMcpServerNames(servers, sessionId, activeNames) {
             if (released)
                 return;
             released = true;
-            for (const name of names)
-                activeNames.delete(name);
+            for (const reservedName of names)
+                activeNames.delete(reservedName);
         },
     };
 }
 function entriesToRecord(entries) {
-    return Object.fromEntries(entries.map(({ name, value }) => [name, value]));
+    return Object.fromEntries(entries.map(({ name: entryName, value }) => [entryName, value]));
 }
 function mcpClientConfig(server, serverName, cwd) {
     if (!('type' in server)) {
