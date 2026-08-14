@@ -13,6 +13,9 @@ Harness. Keep it usable without importing Lody packages.
   and ACP host-plane composition. `presets/` is the pinned copy of the official
   `standard`/`code`/`minimal`/`cordis` Agent presets; update it together with the
   package list and retain the upstream notice.
+  Its persistence default matches upstream `zstd`; hosts may select legacy raw
+  `none` only after inspecting an existing single-encoding root. A mixed root is
+  an error and must never trigger automatic artifact mutation or deletion.
 - `src/capabilities.ts` metadata is authoritative for built-in preset labels exposed
   through ACP. Harness runtime metadata remains authoritative for user presets.
 - Hosts own installation caches, data-directory selection, process supervision,

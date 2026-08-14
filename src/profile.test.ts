@@ -1,7 +1,11 @@
 import { readFile } from 'node:fs/promises';
 import { describe, expect, it } from 'vitest';
 
-import { DEEPSEEK_HARNESS_NPX_PACKAGES, createDeepSeekHarnessCordisConfig } from './profile.js';
+import {
+  DEEPSEEK_HARNESS_DEFAULT_SESSION_COMPRESSION,
+  DEEPSEEK_HARNESS_NPX_PACKAGES,
+  createDeepSeekHarnessCordisConfig,
+} from './profile.js';
 
 describe('DeepSeek Harness profile', () => {
   it('pins the explicit ACP host and Agent preset package closure', () => {
@@ -29,7 +33,18 @@ describe('DeepSeek Harness profile', () => {
     expect(config).toContain('path: "/opt/deepseek-agent-presets"');
     expect(config).toContain("name: '@deepseek-ai/dsh-code-runtime-worker-thread'");
     expect(config).toContain('name: "/opt/acp-extension-dsh.js"');
+    expect(config).toContain('compression: zstd');
     expect(config).not.toMatch(/api[_-]?key:\s+[^D\n]/iu);
+  });
+
+  it('defaults to upstream-compatible zstd and permits a detected legacy raw root', () => {
+    expect(DEEPSEEK_HARNESS_DEFAULT_SESSION_COMPRESSION).toBe('zstd');
+    expect(createDeepSeekHarnessCordisConfig('/opt/adapter.js', '/opt/presets')).toContain(
+      'compression: zstd'
+    );
+    expect(createDeepSeekHarnessCordisConfig('/opt/adapter.js', '/opt/presets', 'none')).toContain(
+      'compression: none'
+    );
   });
 
   it('installs every plugin referenced by the host and shipped Agent presets', async () => {
