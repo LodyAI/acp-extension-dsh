@@ -464,10 +464,12 @@ function configOptions(record: SessionRecord): SessionConfigOption[] {
         const builtIn = DEEPSEEK_HARNESS_AGENT_PRESETS.find(
           (candidate) => candidate.value === preset.id
         );
+        // The pinned Harness presets may carry upstream-localized metadata.
+        // Keep built-in ACP labels stable; runtime metadata still owns user presets.
         return {
           value: preset.id,
-          name: preset.name ?? builtIn?.name ?? preset.id,
-          description: preset.description ?? builtIn?.description ?? null,
+          name: builtIn?.name ?? preset.name ?? preset.id,
+          description: builtIn?.description ?? preset.description ?? null,
         };
       }),
     },
