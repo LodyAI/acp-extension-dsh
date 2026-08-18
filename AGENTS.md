@@ -10,9 +10,12 @@ Harness. Keep it usable without importing Lody packages.
   session-scoped mounting of ACP stdio/HTTP servers through `dsh-mcp-client`.
 - `src/capabilities.ts` owns the selector vocabulary shared with host UIs.
 - `src/profile.ts` owns the pinned Harness version, explicit npx package closure,
-  and ACP host-plane composition. `presets/` is the pinned copy of the official
-  `standard`/`code`/`minimal`/`cordis` Agent presets; update it together with the
-  package list and retain the upstream notice.
+  and ACP host-plane composition. Keep every transitive DSH dependency and peer
+  package in that exact-version closure; Harness caret ranges must never let npm
+  mix a later release candidate into a cold install. `presets/` is the pinned copy
+  of the official `standard`/`code`/`minimal`/`cordis` Agent presets; update it
+  together with the package list and retain the upstream notice. It is excluded
+  from Prettier so the vendored files remain byte-identical to upstream.
   Its persistence default matches upstream `zstd`; hosts may select legacy raw
   `none` only after inspecting an existing single-encoding root. A mixed root is
   an error and must never trigger automatic artifact mutation or deletion.
@@ -30,6 +33,9 @@ available name; normalize invalid names and suffix concurrent collisions so two
 live ACP sessions cannot contend for the native client's process-global namespace.
 MCP plugin fibers belong to the Agent context and must settle before `session/new`
 returns, so failed startup cannot publish a session without its requested tools.
+Forward `assistant/chunk` reasoning deltas immediately as ACP thought chunks. Harness
+may retry after emitting them, and the adapter intentionally does not retract or
+deduplicate those already-visible thoughts; do not replay final reasoning blocks.
 
 ## Checks
 

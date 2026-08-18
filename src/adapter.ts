@@ -84,6 +84,7 @@ type HarnessImageBlock = {
   attachment: { attachmentId: string };
 };
 type HarnessMessageBlock = HarnessTextBlock | HarnessImageBlock | { type: string };
+type HarnessStreamChunk = { type: string; text?: string };
 
 type HarnessTurnEndReason =
   | { kind: 'completed' | 'max-tokens' | 'aborted' | 'interrupted' | 'blocked' }
@@ -94,6 +95,7 @@ type HarnessSessionEvent = {
   data: {
     turn?: number;
     reason?: HarnessTurnEndReason;
+    chunk?: HarnessStreamChunk;
     message?: { content: HarnessMessageBlock[] };
     agentPreset?: string;
   };
@@ -674,7 +676,20 @@ export function apply(ctx: HarnessContext, rawConfig?: DeepSeekAcpAdapterConfig)
     const record = sessions.get(session.header.id);
     if (!record || record.agent.session !== session) return;
     try {
-      if (event.type === 'assistant/message') {
+      if (
+        event.type === 'assistant/chunk' &&
+        event.data.chunk?.type === 'reasoning-delta' &&
+        typeof event.data.chunk.text === 'string' &&
+        event.data.chunk.text.length > 0
+      ) {
+        notify({
+          sessionId: record.agent.session.id,
+          update: {
+            sessionUpdate: 'agent_thought_chunk',
+            content: { type: 'text', text: event.data.chunk.text },
+          },
+        });
+      } else if (event.type === 'assistant/message') {
         for (const block of event.data.message?.content ?? []) {
           if (block.type === 'text' && 'text' in block && block.text.length > 0) {
             notify({

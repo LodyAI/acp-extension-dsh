@@ -1,5 +1,5 @@
 export const ACP_EXTENSION_DSH_VERSION = '0.1.0';
-export const DEEPSEEK_HARNESS_VERSION = '0.1.0-rc.6';
+export const DEEPSEEK_HARNESS_VERSION = '0.1.0-rc.7';
 export const ACP_EXTENSION_DSH_PROFILE_REVISION = 'v3';
 export const ACP_EXTENSION_DSH_SESSION_ROOT_ENV = 'ACP_EXTENSION_DSH_SESSION_ROOT';
 export const ACP_EXTENSION_DSH_QUERY_PATH_ENV = 'ACP_EXTENSION_DSH_QUERY_PATH';
@@ -77,6 +77,52 @@ export const DEEPSEEK_HARNESS_NPX_PACKAGES = [
   '@deepseek-ai/dsh-tool-bash-persistent',
   '@deepseek-ai/dsh-fs-local',
   '@deepseek-ai/dsh-tool-str-replace-editor',
+
+  // Pin the complete transitive DSH dependency and peer closure too. Harness
+  // packages publish caret ranges, so leaving one implicit lets npm mix a later
+  // release candidate into this otherwise immutable composition when published.
+  '@deepseek-ai/dsh-acp',
+  '@deepseek-ai/dsh-agent',
+  '@deepseek-ai/dsh-agent-loop',
+  '@deepseek-ai/dsh-anonymous-user-id',
+  '@deepseek-ai/dsh-app-boot',
+  '@deepseek-ai/dsh-atomic-write',
+  '@deepseek-ai/dsh-attachment',
+  '@deepseek-ai/dsh-bash-local',
+  '@deepseek-ai/dsh-brand',
+  '@deepseek-ai/dsh-code-runtime',
+  '@deepseek-ai/dsh-compaction',
+  '@deepseek-ai/dsh-credentials',
+  '@deepseek-ai/dsh-fs',
+  '@deepseek-ai/dsh-home-paths',
+  '@deepseek-ai/dsh-invariants',
+  '@deepseek-ai/dsh-jobs',
+  '@deepseek-ai/dsh-jobs-local',
+  '@deepseek-ai/dsh-launch-environment',
+  '@deepseek-ai/dsh-llm',
+  '@deepseek-ai/dsh-llm-retry',
+  '@deepseek-ai/dsh-output-retention',
+  '@deepseek-ai/dsh-pwsh-local',
+  '@deepseek-ai/dsh-sandbox',
+  '@deepseek-ai/dsh-sandbox-windows-acl',
+  '@deepseek-ai/dsh-scope',
+  '@deepseek-ai/dsh-session',
+  '@deepseek-ai/dsh-session-persistence',
+  '@deepseek-ai/dsh-session-projection-cache',
+  '@deepseek-ai/dsh-session-query',
+  '@deepseek-ai/dsh-session-title',
+  '@deepseek-ai/dsh-settings',
+  '@deepseek-ai/dsh-shell',
+  '@deepseek-ai/dsh-spill',
+  '@deepseek-ai/dsh-storage',
+  '@deepseek-ai/dsh-storage-domain',
+  '@deepseek-ai/dsh-subagent-in-process-driver',
+  '@deepseek-ai/dsh-subprocess',
+  '@deepseek-ai/dsh-system-prompt',
+  '@deepseek-ai/dsh-timeout',
+  '@deepseek-ai/dsh-tools',
+  '@deepseek-ai/dsh-typert-protocol',
+  '@deepseek-ai/dsh-workflow',
 ] as const;
 
 /**

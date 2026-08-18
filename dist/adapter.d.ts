@@ -15,6 +15,10 @@ type HarnessImageBlock = {
 type HarnessMessageBlock = HarnessTextBlock | HarnessImageBlock | {
     type: string;
 };
+type HarnessStreamChunk = {
+    type: string;
+    text?: string;
+};
 type HarnessTurnEndReason = {
     kind: 'completed' | 'max-tokens' | 'aborted' | 'interrupted' | 'blocked';
 } | {
@@ -28,6 +32,7 @@ type HarnessSessionEvent = {
     data: {
         turn?: number;
         reason?: HarnessTurnEndReason;
+        chunk?: HarnessStreamChunk;
         message?: {
             content: HarnessMessageBlock[];
         };
