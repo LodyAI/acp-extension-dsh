@@ -4,11 +4,14 @@ import { describe, expect, it } from 'vitest';
 import {
   DEEPSEEK_HARNESS_DEFAULT_SESSION_COMPRESSION,
   DEEPSEEK_HARNESS_NPX_PACKAGES,
+  DEEPSEEK_HARNESS_VERSION,
   createDeepSeekHarnessCordisConfig,
 } from './profile.js';
 
 describe('DeepSeek Harness profile', () => {
   it('pins the explicit ACP host and Agent preset package closure', () => {
+    expect(DEEPSEEK_HARNESS_VERSION).toBe('0.1.0-rc.7');
+    expect(new Set(DEEPSEEK_HARNESS_NPX_PACKAGES).size).toBe(DEEPSEEK_HARNESS_NPX_PACKAGES.length);
     expect(DEEPSEEK_HARNESS_NPX_PACKAGES[0]).toBe('@deepseek-ai/dsh-acp-demo');
     expect(DEEPSEEK_HARNESS_NPX_PACKAGES).toEqual(
       expect.arrayContaining([
@@ -17,6 +20,14 @@ describe('DeepSeek Harness profile', () => {
         '@deepseek-ai/dsh-mcp-client',
         '@deepseek-ai/dsh-tool-cordis',
         '@deepseek-ai/dsh-tool-bash-persistent',
+        '@deepseek-ai/dsh-agent',
+        '@deepseek-ai/dsh-code-runtime',
+        '@deepseek-ai/dsh-llm',
+        '@deepseek-ai/dsh-sandbox-windows-acl',
+        '@deepseek-ai/dsh-scope',
+        '@deepseek-ai/dsh-session',
+        '@deepseek-ai/dsh-system-prompt',
+        '@deepseek-ai/dsh-tools',
       ])
     );
     expect(DEEPSEEK_HARNESS_NPX_PACKAGES).not.toContain('@deepseek-ai/dsh');

@@ -1,6 +1,6 @@
 # Third-party notices
 
-The files under `presets/` are copied from DeepSeek Harness 0.1.0-rc.6:
+The files under `presets/` are copied from DeepSeek Harness 0.1.0-rc.7:
 https://github.com/deepseek-ai/deepseek-harness
 
 MIT License
