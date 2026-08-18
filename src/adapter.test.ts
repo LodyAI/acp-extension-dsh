@@ -478,7 +478,7 @@ describe('DeepSeek Harness ACP adapter', () => {
         requestPermission: async () => ({ outcome: { outcome: 'cancelled' as const } }),
         sessionUpdate: async (notification) => {
           updates.push(notification);
-          if (updates.length === 3) markUpdated?.();
+          if (updates.length === 4) markUpdated?.();
         },
       }),
       streams.client
@@ -503,6 +503,14 @@ describe('DeepSeek Harness ACP adapter', () => {
     sessionEvent(createdAgent.session, {
       type: 'assistant/chunk',
       data: { chunk: { type: 'text-delta', text: 'not forwarded before the final message' } },
+    });
+    sessionEvent(createdAgent.session, {
+      type: 'assistant/chunk',
+      data: { chunk: { type: 'block-end', block: { type: 'reasoning' } } },
+    });
+    sessionEvent(createdAgent.session, {
+      type: 'assistant/chunk',
+      data: { chunk: { type: 'block-end', block: { type: 'text' } } },
     });
     sessionEvent(createdAgent.session, {
       type: 'assistant/message',
@@ -530,6 +538,13 @@ describe('DeepSeek Harness ACP adapter', () => {
         update: {
           sessionUpdate: 'agent_thought_chunk',
           content: { type: 'text', text: 'Second thought.' },
+        },
+      },
+      {
+        sessionId: session.sessionId,
+        update: {
+          sessionUpdate: 'agent_thought_chunk',
+          content: { type: 'text', text: '\n\n' },
         },
       },
       {
