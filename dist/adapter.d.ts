@@ -18,6 +18,9 @@ type HarnessMessageBlock = HarnessTextBlock | HarnessImageBlock | {
 type HarnessStreamChunk = {
     type: string;
     text?: string;
+    block?: {
+        type: string;
+    };
 };
 type HarnessTurnEndReason = {
     kind: 'completed' | 'max-tokens' | 'aborted' | 'interrupted' | 'blocked';

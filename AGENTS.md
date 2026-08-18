@@ -33,9 +33,11 @@ available name; normalize invalid names and suffix concurrent collisions so two
 live ACP sessions cannot contend for the native client's process-global namespace.
 MCP plugin fibers belong to the Agent context and must settle before `session/new`
 returns, so failed startup cannot publish a session without its requested tools.
-Forward `assistant/chunk` reasoning deltas immediately as ACP thought chunks. Harness
-may retry after emitting them, and the adapter intentionally does not retract or
-deduplicate those already-visible thoughts; do not replay final reasoning blocks.
+Forward `assistant/chunk` reasoning deltas immediately as ACP thought chunks and emit
+`\n\n` when their reasoning block ends, matching Lody's semantic thought-section
+separator. Harness may retry after emitting them, and the adapter intentionally does
+not retract or deduplicate those already-visible thoughts; do not replay final reasoning
+blocks.
 
 ## Checks
 
