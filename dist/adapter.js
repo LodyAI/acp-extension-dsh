@@ -407,6 +407,17 @@ export function apply(ctx, rawConfig) {
                     },
                 });
             }
+            else if (event.type === 'assistant/chunk' &&
+                event.data.chunk?.type === 'block-end' &&
+                event.data.chunk.block?.type === 'reasoning') {
+                notify({
+                    sessionId: record.agent.session.id,
+                    update: {
+                        sessionUpdate: 'agent_thought_chunk',
+                        content: { type: 'text', text: '\n\n' },
+                    },
+                });
+            }
             else if (event.type === 'assistant/message') {
                 for (const block of event.data.message?.content ?? []) {
                     if (block.type === 'text' && 'text' in block && block.text.length > 0) {
