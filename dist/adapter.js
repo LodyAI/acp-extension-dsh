@@ -23,6 +23,9 @@ export const inject = [
     'sessionPersistence',
     'sessionQuery',
 ];
+const LODY_CAPABILITIES = {
+    compaction: { version: 1 },
+};
 const MODEL_CONFIG_ID = 'model';
 const MODE_CONFIG_ID = 'mode';
 const REASONING_EFFORT_CONFIG_ID = 'reasoning_effort';
@@ -443,6 +446,42 @@ export function apply(ctx, rawConfig) {
                     }
                 }
             }
+            else if (event.type === 'compaction/start' && event.data.compactionId) {
+                const activity = {
+                    version: 1,
+                    kind: 'context_compaction',
+                    automatic: event.data.turn !== null,
+                };
+                notify({
+                    sessionId: record.agent.session.id,
+                    update: {
+                        sessionUpdate: 'tool_call',
+                        toolCallId: `context-compaction:${event.data.compactionId}`,
+                        title: 'Compacting context',
+                        kind: 'think',
+                        status: 'in_progress',
+                        _meta: { lody: { activity } },
+                    },
+                });
+            }
+            else if (event.type === 'compaction/end' && event.data.compactionId) {
+                const activity = {
+                    version: 1,
+                    kind: 'context_compaction',
+                    automatic: event.data.turn !== null,
+                    ...(event.data.error ? { failureReason: event.data.error } : {}),
+                };
+                notify({
+                    sessionId: record.agent.session.id,
+                    update: {
+                        sessionUpdate: 'tool_call_update',
+                        toolCallId: `context-compaction:${event.data.compactionId}`,
+                        title: event.data.error ? 'Context compaction failed' : 'Context compacted',
+                        status: event.data.error ? 'failed' : 'completed',
+                        _meta: { lody: { activity } },
+                    },
+                });
+            }
         }
         finally {
             const inflight = record.inflight;
@@ -550,6 +589,7 @@ export function apply(ctx, rawConfig) {
                         promptCapabilities: { image: false, audio: false, embeddedContext: false },
                         mcpCapabilities: { http: true },
                         sessionCapabilities: { close: {} },
+                        _meta: { lody: LODY_CAPABILITIES },
                     },
                     authMethods: [],
                 });

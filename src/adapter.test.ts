@@ -143,6 +143,9 @@ describe('DeepSeek Harness ACP adapter', () => {
       clientCapabilities: {},
     });
     expect(initialized.agentInfo?.name).toBe('acp-extension-dsh');
+    expect(initialized.agentCapabilities._meta).toEqual({
+      lody: { compaction: { version: 1 } },
+    });
 
     const created = await client.newSession({ cwd: process.cwd(), mcpServers: [] });
     expect(created.modes?.currentModeId).toBe('workspace-write');
@@ -404,7 +407,7 @@ describe('DeepSeek Harness ACP adapter', () => {
     expect(mountedConfigs.at(-1)?.serverName).toBe('failing');
   });
 
-  it('streams Harness reasoning deltas as ACP thought chunks', async () => {
+  it('streams Harness reasoning and compaction lifecycle updates', async () => {
     type AdapterContext = Parameters<typeof apply>[0];
     type TestAgent = NonNullable<ReturnType<AdapterContext['agents']['get']>>;
 
@@ -478,7 +481,7 @@ describe('DeepSeek Harness ACP adapter', () => {
         requestPermission: async () => ({ outcome: { outcome: 'cancelled' as const } }),
         sessionUpdate: async (notification) => {
           updates.push(notification);
-          if (updates.length === 4) markUpdated?.();
+          if (updates.length === 8) markUpdated?.();
         },
       }),
       streams.client
@@ -523,6 +526,22 @@ describe('DeepSeek Harness ACP adapter', () => {
         },
       },
     });
+    sessionEvent(createdAgent.session, {
+      type: 'compaction/start',
+      data: { compactionId: 'manual-1', turn: null },
+    });
+    sessionEvent(createdAgent.session, {
+      type: 'compaction/end',
+      data: { compactionId: 'manual-1', turn: null },
+    });
+    sessionEvent(createdAgent.session, {
+      type: 'compaction/start',
+      data: { compactionId: 'automatic-1', turn: 2 },
+    });
+    sessionEvent(createdAgent.session, {
+      type: 'compaction/end',
+      data: { compactionId: 'automatic-1', turn: 2, error: 'summary failed' },
+    });
 
     await updated;
     expect(updates).toEqual([
@@ -552,6 +571,69 @@ describe('DeepSeek Harness ACP adapter', () => {
         update: {
           sessionUpdate: 'agent_message_chunk',
           content: { type: 'text', text: 'Final answer.' },
+        },
+      },
+      {
+        sessionId: session.sessionId,
+        update: {
+          sessionUpdate: 'tool_call',
+          toolCallId: 'context-compaction:manual-1',
+          title: 'Compacting context',
+          kind: 'think',
+          status: 'in_progress',
+          _meta: {
+            lody: {
+              activity: { version: 1, kind: 'context_compaction', automatic: false },
+            },
+          },
+        },
+      },
+      {
+        sessionId: session.sessionId,
+        update: {
+          sessionUpdate: 'tool_call_update',
+          toolCallId: 'context-compaction:manual-1',
+          title: 'Context compacted',
+          status: 'completed',
+          _meta: {
+            lody: {
+              activity: { version: 1, kind: 'context_compaction', automatic: false },
+            },
+          },
+        },
+      },
+      {
+        sessionId: session.sessionId,
+        update: {
+          sessionUpdate: 'tool_call',
+          toolCallId: 'context-compaction:automatic-1',
+          title: 'Compacting context',
+          kind: 'think',
+          status: 'in_progress',
+          _meta: {
+            lody: {
+              activity: { version: 1, kind: 'context_compaction', automatic: true },
+            },
+          },
+        },
+      },
+      {
+        sessionId: session.sessionId,
+        update: {
+          sessionUpdate: 'tool_call_update',
+          toolCallId: 'context-compaction:automatic-1',
+          title: 'Context compaction failed',
+          status: 'failed',
+          _meta: {
+            lody: {
+              activity: {
+                version: 1,
+                kind: 'context_compaction',
+                automatic: true,
+                failureReason: 'summary failed',
+              },
+            },
+          },
         },
       },
     ]);

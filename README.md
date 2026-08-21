@@ -9,6 +9,11 @@ stdio or Streamable HTTP MCP servers into each Harness Agent scope. Harness
 continues to own model execution, sandbox enforcement, persistence, preset
 composition, tool execution, and one-shot approvals.
 
+The adapter advertises Core's `_meta.lody.compaction` capability and translates
+Harness `compaction/start` and `compaction/end` events into a standard ACP tool
+lifecycle carrying `_meta.lody.activity`. Manual and automatic compaction remain
+distinguishable, and failed compactions keep the Harness error reason.
+
 ## Exports
 
 - `acp-extension-dsh` exports the Cordis plugin: `apply`, `inject`, and `name`.

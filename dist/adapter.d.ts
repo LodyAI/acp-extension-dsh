@@ -33,13 +33,15 @@ type HarnessTurnEndReason = {
 type HarnessSessionEvent = {
     type: string;
     data: {
-        turn?: number;
+        turn?: number | null;
         reason?: HarnessTurnEndReason;
         chunk?: HarnessStreamChunk;
         message?: {
             content: HarnessMessageBlock[];
         };
         agentPreset?: string;
+        compactionId?: string;
+        error?: string;
     };
 };
 type HarnessSession = {
