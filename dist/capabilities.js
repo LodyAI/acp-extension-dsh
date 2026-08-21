@@ -21,11 +21,19 @@ export const DEEPSEEK_HARNESS_MODELS = [
         modelId: 'deepseek-v4-flash',
         name: 'DeepSeek-V4-Flash',
         description: 'Faster DeepSeek Harness coding model.',
+        inputModalities: ['text'],
     },
     {
         modelId: 'deepseek-v4-pro',
         name: 'DeepSeek-V4-Pro',
         description: 'More capable DeepSeek Harness coding model.',
+        inputModalities: ['text'],
+    },
+    {
+        modelId: 'deepseek-v4-flash-vision-exp',
+        name: 'DeepSeek-V4-Flash-Vision-Exp',
+        description: 'Experimental multimodal DeepSeek model with image understanding.',
+        inputModalities: ['text', 'image'],
     },
 ];
 export const DEEPSEEK_HARNESS_REASONING_OPTIONS = [
