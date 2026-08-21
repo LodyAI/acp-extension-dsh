@@ -8,7 +8,12 @@ Harness. Keep it usable without importing Lody packages.
 - `src/adapter.ts` owns ACP lifecycle, prompt streaming, model/reasoning changes,
   permission-preset selection, blank-session Agent preset composition, and
   session-scoped mounting of ACP stdio/HTTP servers through `dsh-mcp-client`.
-- `src/capabilities.ts` owns the selector vocabulary shared with host UIs.
+- `src/capabilities.ts` owns the static preflight metadata shared with host UIs.
+  Each ACP session must instead derive its model selector, legacy `models`
+  response, and image admission from the Harness LLM catalog returned by
+  `ctx.llm.listModels()`. Do not override that catalog in the generated profile.
+  Persist accepted image bytes through the Harness attachment service before
+  queuing the user message.
 - `src/profile.ts` owns the pinned Harness version, explicit npx package closure,
   and ACP host-plane composition. Keep every transitive DSH dependency and peer
   package in that exact-version closure; Harness caret ranges must never let npm
@@ -19,6 +24,9 @@ Harness. Keep it usable without importing Lody packages.
   Its persistence default matches upstream `zstd`; hosts may select legacy raw
   `none` only after inspecting an existing single-encoding root. A mixed root is
   an error and must never trigger automatic artifact mutation or deletion.
+  The `0.1.1-rc.1` package family has a cyclic same-version peer graph that npm 10
+  mis-resolves when every DSH peer is explicitly pinned; npx hosts must use
+  `--force`, not `--legacy-peer-deps`, so external Cordis peers are still installed.
 - `src/capabilities.ts` metadata is authoritative for built-in preset labels exposed
   through ACP. Harness runtime metadata remains authoritative for user presets.
 - Hosts own installation caches, data-directory selection, process supervision,

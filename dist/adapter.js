@@ -10,7 +10,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { isAbsolute } from 'node:path';
 import { Readable, Writable } from 'node:stream';
 import { AgentSideConnection, ndJsonStream, PROTOCOL_VERSION, RequestError, } from '@agentclientprotocol/sdk';
-import { DEEPSEEK_HARNESS_AGENT_PRESETS, DEEPSEEK_HARNESS_MODELS, DEEPSEEK_HARNESS_PERMISSION_MODES, DEEPSEEK_HARNESS_REASONING_OPTIONS, } from './capabilities.js';
+import { DEEPSEEK_HARNESS_AGENT_PRESETS, DEEPSEEK_HARNESS_PERMISSION_MODES, DEEPSEEK_HARNESS_REASONING_OPTIONS, } from './capabilities.js';
 import { ACP_EXTENSION_DSH_VERSION } from './profile.js';
 export const name = 'acp-extension-dsh';
 // Waiting for persistence/query also preserves the upstream composite's
@@ -18,7 +18,9 @@ export const name = 'acp-extension-dsh';
 export const inject = [
     'agents',
     'agentPresets',
+    'attachments',
     'loader',
+    'llm',
     'permissionPresets',
     'sessionPersistence',
     'sessionQuery',
@@ -32,7 +34,24 @@ const MCP_TOOL_CALL_TIMEOUT_MS = 60_000;
 const MCP_SERVER_NAME_MAX_LENGTH = 32;
 const MCP_SERVER_NAME_HASH_LENGTH = 8;
 const INVALID_MCP_SERVER_NAME_CHARS = /[^A-Za-z0-9_-]/gu;
-const MODEL_IDS = new Set(DEEPSEEK_HARNESS_MODELS.map((model) => model.modelId));
+const IMAGE_MEDIA_TYPES = [
+    'image/png',
+    'image/jpeg',
+    'image/webp',
+    'image/gif',
+];
+const CANONICAL_BASE64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u;
+const IMAGE_ADMISSION_ERROR_CODES = new Set([
+    'TOO_MANY_IMAGES',
+    'IMAGES_TOO_LARGE',
+    'UNSUPPORTED_IMAGE_TYPE',
+    'INVALID_IMAGE_BASE64',
+    'INVALID_IMAGE',
+    'IMAGE_TYPE_MISMATCH',
+    'IMAGE_TOO_LARGE',
+    'IMAGE_TOO_MANY_PIXELS',
+    'IMAGE_DIMENSION_TOO_LARGE',
+]);
 const PERMISSION_MODE_IDS = new Set(DEEPSEEK_HARNESS_PERMISSION_MODES.map((mode) => mode.id));
 const REASONING_EFFORT_IDS = new Set(DEEPSEEK_HARNESS_REASONING_OPTIONS.map((effort) => effort.value));
 function invalidParams(detail) {
@@ -48,9 +67,6 @@ function resolveAdapterConfig(config) {
     const provider = nonEmptyString(config?.provider, 'deepseek-official');
     const model = nonEmptyString(config?.model, 'deepseek-v4-pro');
     const reasoningEffort = config?.reasoningEffort ?? 'max';
-    if (!MODEL_IDS.has(model)) {
-        throw new Error(`acp-extension-dsh: unsupported model ${JSON.stringify(model)}`);
-    }
     if (!REASONING_EFFORT_IDS.has(reasoningEffort)) {
         throw new Error(`acp-extension-dsh: unsupported reasoning effort ${JSON.stringify(reasoningEffort)}`);
     }
@@ -60,6 +76,27 @@ function resolveAdapterConfig(config) {
         reasoningEffort,
         ...(config?.stream ? { stream: config.stream } : {}),
     };
+}
+async function loadHarnessModels(ctx, provider) {
+    const llm = ctx.get('llm');
+    if (!llm)
+        throw new Error('acp-extension-dsh: no Harness LLM catalog is mounted');
+    const listed = await llm.listModels(provider);
+    const models = [];
+    const ids = new Set();
+    for (const model of listed) {
+        if (model.provider !== provider || !model.id.trim())
+            continue;
+        if (ids.has(model.id)) {
+            throw new Error(`acp-extension-dsh: duplicate model ${JSON.stringify(model.id)} for provider ${JSON.stringify(provider)}`);
+        }
+        ids.add(model.id);
+        models.push({
+            ...model,
+            ...(model.inputModalities ? { inputModalities: [...model.inputModalities] } : {}),
+        });
+    }
+    return models;
 }
 async function loadMcpClientPlugin(agentContext) {
     const module = agentContext.loader.unwrapExports(await agentContext.loader.import(MCP_CLIENT_PACKAGE));
@@ -217,9 +254,9 @@ function configOptions(record) {
             category: 'model',
             type: 'select',
             currentValue: record.selection.current.model,
-            options: DEEPSEEK_HARNESS_MODELS.map((model) => ({
-                value: model.modelId,
-                name: model.name,
+            options: record.models.map((model) => ({
+                value: model.id,
+                name: model.name ?? model.id,
                 description: model.description ?? null,
             })),
         },
@@ -248,28 +285,104 @@ function modeState(record) {
         })),
     };
 }
-function acpPromptToText(prompt) {
-    return prompt
-        .flatMap((block) => {
-        if (block.type === 'text')
-            return [block.text];
-        if (block.type === 'resource_link') {
-            return [
-                `\n[resource_link name=${JSON.stringify(block.name)} uri=${JSON.stringify(block.uri)}]\n`,
-            ];
+function modelSupportsImages(models, modelId) {
+    return models.some((model) => model.id === modelId &&
+        model.inputModalities?.includes('image'));
+}
+function imageMediaType(value) {
+    return IMAGE_MEDIA_TYPES.includes(value)
+        ? value
+        : undefined;
+}
+function decodePromptImage(block) {
+    const mediaType = imageMediaType(block.mimeType);
+    if (!mediaType) {
+        throw invalidParams('image mimeType must be image/png, image/jpeg, image/webp, or image/gif');
+    }
+    if (!block.data || !CANONICAL_BASE64.test(block.data)) {
+        throw invalidParams('image data must be canonical base64');
+    }
+    const decoded = Buffer.from(block.data, 'base64');
+    if (decoded.toString('base64') !== block.data) {
+        throw invalidParams('image data must be canonical base64');
+    }
+    return { data: new Uint8Array(decoded), mediaType };
+}
+function isImageAdmissionError(error) {
+    return (error instanceof Error &&
+        'code' in error &&
+        typeof error.code === 'string' &&
+        IMAGE_ADMISSION_ERROR_CODES.has(error.code));
+}
+async function admitAcpPrompt(prompt, models, modelId, attachments) {
+    const images = [];
+    for (const block of prompt) {
+        switch (block.type) {
+            case 'text':
+            case 'resource_link':
+                break;
+            case 'image':
+                if (!modelSupportsImages(models, modelId)) {
+                    throw invalidParams(`model ${JSON.stringify(modelId)} does not support image input`);
+                }
+                images.push(decodePromptImage(block));
+                break;
+            case 'audio':
+                throw invalidParams('audio prompt content is not supported');
+            case 'resource':
+                throw invalidParams('embedded resource prompt content is not supported');
+            default:
+                throw invalidParams('unsupported ACP prompt content');
         }
-        return [];
-    })
-        .join('');
+    }
+    let refs = [];
+    if (images.length > 0) {
+        if (!attachments)
+            throw internalError('no Harness attachment store is mounted');
+        try {
+            refs = await attachments.saveImages(images);
+        }
+        catch (error) {
+            if (isImageAdmissionError(error))
+                throw invalidParams(error.message);
+            throw internalError('unable to persist the prompt image batch');
+        }
+    }
+    const content = [];
+    let pendingText = '';
+    let imageIndex = 0;
+    const flushText = () => {
+        if (!pendingText)
+            return;
+        content.push({ type: 'text', text: pendingText });
+        pendingText = '';
+    };
+    for (const block of prompt) {
+        if (block.type === 'text') {
+            pendingText += block.text;
+        }
+        else if (block.type === 'resource_link') {
+            pendingText += `\n[resource_link name=${JSON.stringify(block.name)} uri=${JSON.stringify(block.uri)}]\n`;
+        }
+        else if (block.type === 'image') {
+            flushText();
+            const attachment = refs[imageIndex++];
+            if (!attachment)
+                throw internalError('the attachment store returned an incomplete image batch');
+            content.push({ type: 'image', attachment });
+        }
+    }
+    flushText();
+    if (!content.some((block) => block.type === 'image' || (block.type === 'text' && block.text.trim().length > 0))) {
+        throw invalidParams('empty prompt');
+    }
+    return content;
 }
-function promptHasUnsupportedContent(prompt) {
-    return prompt.some((block) => block.type !== 'text' && block.type !== 'resource_link');
-}
-function createUserMessage(text) {
+function createUserMessage(id, content) {
     return Object.freeze({
-        id: randomUUID(),
+        id,
         role: 'user',
-        content: [Object.freeze({ type: 'text', text })],
+        content: Object.freeze(content.map((block) => Object.freeze(block))),
         source: Object.freeze({ kind: 'user' }),
     });
 }
@@ -524,7 +637,7 @@ export function apply(ctx, rawConfig) {
             });
         }
         else if (params.configId === MODEL_CONFIG_ID) {
-            assertAllowed(value, MODEL_IDS, 'model');
+            assertAllowed(value, new Set(record.models.map((model) => model.id)), 'model');
             record.selection.current = { ...record.selection.current, model: value };
         }
         else if (params.configId === REASONING_EFFORT_CONFIG_ID) {
@@ -542,17 +655,22 @@ export function apply(ctx, rawConfig) {
     const makeAgent = (connection) => {
         conn = connection;
         return {
-            initialize(_params) {
-                return Promise.resolve({
+            async initialize(_params) {
+                const models = await loadHarnessModels(ctx, config.provider);
+                return {
                     protocolVersion: PROTOCOL_VERSION,
                     agentInfo: { name: 'acp-extension-dsh', version: ACP_EXTENSION_DSH_VERSION },
                     agentCapabilities: {
-                        promptCapabilities: { image: false, audio: false, embeddedContext: false },
+                        promptCapabilities: {
+                            image: models.some((model) => modelSupportsImages(models, model.id)),
+                            audio: false,
+                            embeddedContext: false,
+                        },
                         mcpCapabilities: { http: true },
                         sessionCapabilities: { close: {} },
                     },
                     authMethods: [],
-                });
+                };
             },
             authenticate(_params) {
                 return Promise.resolve();
@@ -560,6 +678,13 @@ export function apply(ctx, rawConfig) {
             async newSession(params) {
                 assertOpen();
                 validateSessionParams(params);
+                let models;
+                try {
+                    models = await loadHarnessModels(ctx, config.provider);
+                }
+                catch (error) {
+                    throw internalError(`failed to list models: ${errorChain(error)}`);
+                }
                 const sessionId = randomUUID();
                 const selection = {
                     current: {
@@ -622,6 +747,7 @@ export function apply(ctx, rawConfig) {
                     permissionMode,
                     agentPreset: mountedPreset,
                     agentPresetOptions,
+                    models,
                     started: false,
                 };
                 sessions.set(sessionId, record);
@@ -629,6 +755,14 @@ export function apply(ctx, rawConfig) {
                     sessionId,
                     modes: modeState(record),
                     configOptions: configOptions(record),
+                    models: {
+                        currentModelId: record.selection.current.model,
+                        availableModels: record.models.map((model) => ({
+                            modelId: model.id,
+                            name: model.name ?? model.id,
+                            description: model.description ?? null,
+                        })),
+                    },
                 };
             },
             setSessionMode(params) {
@@ -643,20 +777,29 @@ export function apply(ctx, rawConfig) {
                 const record = requireSession(params.sessionId);
                 if (record.inflight)
                     throw invalidParams('a prompt is already in flight for this session');
-                if (promptHasUnsupportedContent(params.prompt)) {
-                    throw invalidParams('only text and resource_link prompt content is supported');
-                }
-                const text = acpPromptToText(params.prompt);
-                if (!text.trim())
-                    throw invalidParams('empty prompt');
                 if (ctx.agents.get(record.agent.id) !== record.agent) {
                     throw internalError('prompt was not queued: the agent was disposed outside the bridge');
                 }
-                const message = createUserMessage(text);
-                record.started = true;
-                const stopReason = await new Promise((resolve, reject) => {
-                    const inflight = { resolve, reject, messageId: message.id };
-                    record.inflight = inflight;
+                const attachments = ctx.get('attachments');
+                const messageId = randomUUID();
+                let resolvePrompt;
+                let rejectPrompt;
+                const completion = new Promise((resolve, reject) => {
+                    resolvePrompt = resolve;
+                    rejectPrompt = reject;
+                });
+                const inflight = {
+                    resolve: resolvePrompt,
+                    reject: rejectPrompt,
+                    messageId,
+                };
+                record.inflight = inflight;
+                try {
+                    const content = await admitAcpPrompt(params.prompt, record.models, record.selection.current.model, attachments);
+                    if (record.inflight !== inflight)
+                        return { stopReason: await completion };
+                    const message = createUserMessage(messageId, content);
+                    record.started = true;
                     try {
                         record.agent.followup(message);
                     }
@@ -676,8 +819,13 @@ export function apply(ctx, rawConfig) {
                                 : turnEndToStopReason(end)
                             : 'cancelled');
                     });
-                });
-                return { stopReason };
+                }
+                catch (error) {
+                    if (record.inflight === inflight)
+                        record.inflight = undefined;
+                    throw error;
+                }
+                return { stopReason: await completion };
             },
             cancel(params) {
                 const record = sessions.get(params.sessionId);

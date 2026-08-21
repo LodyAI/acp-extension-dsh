@@ -1,6 +1,6 @@
 export const ACP_EXTENSION_DSH_VERSION = '0.1.0';
-export const DEEPSEEK_HARNESS_VERSION = '0.1.0-rc.7';
-export const ACP_EXTENSION_DSH_PROFILE_REVISION = 'v3';
+export const DEEPSEEK_HARNESS_VERSION = '0.1.1-rc.1';
+export const ACP_EXTENSION_DSH_PROFILE_REVISION = 'v4';
 export const ACP_EXTENSION_DSH_SESSION_ROOT_ENV = 'ACP_EXTENSION_DSH_SESSION_ROOT';
 export const ACP_EXTENSION_DSH_QUERY_PATH_ENV = 'ACP_EXTENSION_DSH_QUERY_PATH';
 export const DEEPSEEK_HARNESS_DEFAULT_SESSION_COMPRESSION = 'zstd';
@@ -16,6 +16,7 @@ export const DEEPSEEK_HARNESS_NPX_PACKAGES = [
     '@deepseek-ai/dsh-session-persistence-jsonl',
     '@deepseek-ai/dsh-session-checkpoint-policy',
     '@deepseek-ai/dsh-session-query-sqlite',
+    '@deepseek-ai/dsh-attachment-local',
     '@deepseek-ai/dsh-llm-deepseek',
     '@deepseek-ai/dsh-sandbox-local',
     '@deepseek-ai/dsh-sandbox-policy',
@@ -71,6 +72,7 @@ export const DEEPSEEK_HARNESS_NPX_PACKAGES = [
     '@deepseek-ai/dsh-terminal',
     '@deepseek-ai/dsh-terminal-bash',
     '@deepseek-ai/dsh-tool-bash-persistent',
+    '@deepseek-ai/dsh-tool-pwsh-persistent',
     '@deepseek-ai/dsh-fs-local',
     '@deepseek-ai/dsh-tool-str-replace-editor',
     // Pin the complete transitive DSH dependency and peer closure too. Harness
@@ -153,14 +155,14 @@ export function createDeepSeekHarnessCordisConfig(adapterPath, presetRoot, sessi
   config:
     path: !!js process.env.${ACP_EXTENSION_DSH_QUERY_PATH_ENV}
 
+- id: attachment-local
+  name: '@deepseek-ai/dsh-attachment-local'
+
 - id: llm-deepseek
   name: '@deepseek-ai/dsh-llm-deepseek'
   config:
     thinking: enabled
     reasoningEffort: max
-    models:
-      - id: deepseek-v4-flash
-      - id: deepseek-v4-pro
 
 - id: sandbox
   name: '@deepseek-ai/dsh-sandbox-local'

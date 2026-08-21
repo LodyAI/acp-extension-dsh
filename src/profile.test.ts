@@ -10,15 +10,17 @@ import {
 
 describe('DeepSeek Harness profile', () => {
   it('pins the explicit ACP host and Agent preset package closure', () => {
-    expect(DEEPSEEK_HARNESS_VERSION).toBe('0.1.0-rc.7');
+    expect(DEEPSEEK_HARNESS_VERSION).toBe('0.1.1-rc.1');
     expect(new Set(DEEPSEEK_HARNESS_NPX_PACKAGES).size).toBe(DEEPSEEK_HARNESS_NPX_PACKAGES.length);
     expect(DEEPSEEK_HARNESS_NPX_PACKAGES[0]).toBe('@deepseek-ai/dsh-acp-demo');
     expect(DEEPSEEK_HARNESS_NPX_PACKAGES).toEqual(
       expect.arrayContaining([
         '@deepseek-ai/dsh-agent-presets',
         '@deepseek-ai/dsh-agent-tool-presentation',
+        '@deepseek-ai/dsh-attachment-local',
         '@deepseek-ai/dsh-mcp-client',
         '@deepseek-ai/dsh-tool-cordis',
+        '@deepseek-ai/dsh-tool-pwsh-persistent',
         '@deepseek-ai/dsh-tool-bash-persistent',
         '@deepseek-ai/dsh-agent',
         '@deepseek-ai/dsh-code-runtime',
@@ -43,6 +45,8 @@ describe('DeepSeek Harness profile', () => {
     expect(config).toContain('default: standard');
     expect(config).toContain('path: "/opt/deepseek-agent-presets"');
     expect(config).toContain("name: '@deepseek-ai/dsh-code-runtime-worker-thread'");
+    expect(config).toContain("name: '@deepseek-ai/dsh-attachment-local'");
+    expect(config).not.toContain('\n    models:');
     expect(config).toContain('name: "/opt/acp-extension-dsh.js"');
     expect(config).toContain('compression: zstd');
     expect(config).not.toMatch(/api[_-]?key:\s+[^D\n]/iu);

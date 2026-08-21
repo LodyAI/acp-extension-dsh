@@ -6,11 +6,17 @@ type HarnessTextBlock = {
     type: 'text';
     text: string;
 };
+type HarnessImageMediaType = 'image/png' | 'image/jpeg' | 'image/webp' | 'image/gif';
+type HarnessImageAttachmentRef = {
+    attachmentId: string;
+    mediaType: HarnessImageMediaType;
+    bytes: number;
+    width: number;
+    height: number;
+};
 type HarnessImageBlock = {
     type: 'image';
-    attachment: {
-        attachmentId: string;
-    };
+    attachment: HarnessImageAttachmentRef;
 };
 type HarnessMessageBlock = HarnessTextBlock | HarnessImageBlock | {
     type: string;
@@ -65,10 +71,7 @@ type HarnessAgent = {
 type HarnessUserMessage = {
     id: string;
     role: 'user';
-    content: Array<{
-        type: 'text';
-        text: string;
-    }>;
+    content: Array<HarnessTextBlock | HarnessImageBlock>;
     source: {
         kind: 'user';
     };
