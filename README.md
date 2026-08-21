@@ -36,6 +36,12 @@ to the profile builder only after verifying that the root contains raw
 are single-encoding stores: hosts must refuse mixed roots without moving,
 rewriting, or deleting user artifacts.
 
+The ACP profile keeps the session-query service mounted for exact reads but sets
+its full-text SQLite index to `openAt: never`. This composition does not expose
+the session-search tool, and public Node distributions cannot be assumed to
+include SQLite FTS5. Disabling the unused index prevents ACP startup from
+depending on that optional SQLite build feature.
+
 ## Development
 
 ```sh

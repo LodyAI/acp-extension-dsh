@@ -24,6 +24,9 @@ Harness. Keep it usable without importing Lody packages.
   Its persistence default matches upstream `zstd`; hosts may select legacy raw
   `none` only after inspecting an existing single-encoding root. A mixed root is
   an error and must never trigger automatic artifact mutation or deletion.
+  Keep the SQLite session-query service mounted with `openAt: never`: this ACP
+  composition needs its exact-read contract but exposes no full-text search,
+  and public Node builds do not reliably include SQLite FTS5.
   The `0.1.1-rc.1` package family has a cyclic same-version peer graph that npm 10
   mis-resolves when every DSH peer is explicitly pinned; npx hosts must use
   `--force`, not `--legacy-peer-deps`, so external Cordis peers are still installed.

@@ -1,6 +1,6 @@
 export const ACP_EXTENSION_DSH_VERSION = '0.1.0';
 export const DEEPSEEK_HARNESS_VERSION = '0.1.1-rc.1';
-export const ACP_EXTENSION_DSH_PROFILE_REVISION = 'v4';
+export const ACP_EXTENSION_DSH_PROFILE_REVISION = 'v5';
 export const ACP_EXTENSION_DSH_SESSION_ROOT_ENV = 'ACP_EXTENSION_DSH_SESSION_ROOT';
 export const ACP_EXTENSION_DSH_QUERY_PATH_ENV = 'ACP_EXTENSION_DSH_QUERY_PATH';
 export const DEEPSEEK_HARNESS_DEFAULT_SESSION_COMPRESSION = 'zstd';
@@ -154,6 +154,7 @@ export function createDeepSeekHarnessCordisConfig(adapterPath, presetRoot, sessi
   name: '@deepseek-ai/dsh-session-query-sqlite'
   config:
     path: !!js process.env.${ACP_EXTENSION_DSH_QUERY_PATH_ENV}
+    openAt: never
 
 - id: attachment-local
   name: '@deepseek-ai/dsh-attachment-local'

@@ -44,6 +44,7 @@ describe('DeepSeek Harness profile', () => {
     expect(config).toContain("name: '@deepseek-ai/dsh-agent-presets'");
     expect(config).toContain('default: standard');
     expect(config).toContain('path: "/opt/deepseek-agent-presets"');
+    expect(config).toContain('openAt: never');
     expect(config).toContain("name: '@deepseek-ai/dsh-code-runtime-worker-thread'");
     expect(config).toContain("name: '@deepseek-ai/dsh-attachment-local'");
     expect(config).not.toContain('\n    models:');
