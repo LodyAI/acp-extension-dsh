@@ -8,9 +8,24 @@ import {
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { apply } from './adapter.js';
-import { DEEPSEEK_HARNESS_AGENT_PRESETS } from './capabilities.js';
+import { DEEPSEEK_HARNESS_AGENT_PRESETS, DEEPSEEK_HARNESS_MODELS } from './capabilities.js';
 
 type Listener = (...args: unknown[]) => unknown;
+
+const DEFAULT_LLM_CATALOG = {
+  listModels: async (provider: string) =>
+    DEEPSEEK_HARNESS_MODELS.map((model) => ({
+      provider,
+      id: model.modelId,
+      name: model.name,
+      description: model.description,
+      inputModalities: model.inputModalities,
+    })),
+};
+
+function testHarnessService(name: string): unknown {
+  return name === 'llm' ? DEFAULT_LLM_CATALOG : undefined;
+}
 
 function connectedStreams(): { agent: Stream; client: Stream } {
   const clientToAgent = new TransformStream<AnyMessage, AnyMessage>();
@@ -119,7 +134,7 @@ describe('DeepSeek Harness ACP adapter', () => {
       ): () => void {
         return () => undefined;
       },
-      get: () => undefined,
+      get: testHarnessService,
       effect: (register) => {
         disposers.push(register());
       },
@@ -304,7 +319,7 @@ describe('DeepSeek Harness ACP adapter', () => {
       },
       logger: { warn: vi.fn() },
       on: () => () => undefined,
-      get: () => undefined,
+      get: testHarnessService,
       effect: (register) => {
         disposers.push(register());
       },
@@ -407,6 +422,185 @@ describe('DeepSeek Harness ACP adapter', () => {
     expect(mountedConfigs.at(-1)?.serverName).toBe('failing');
   });
 
+  it('persists ACP images for the selected vision model and rejects them on text models', async () => {
+    type AdapterContext = Parameters<typeof apply>[0];
+    type TestAgent = NonNullable<ReturnType<AdapterContext['agents']['get']>>;
+
+    const streams = connectedStreams();
+    const agents = new Map<string, TestAgent>();
+    const queuedMessages: unknown[] = [];
+    const saveImages = vi.fn(async () => [
+      {
+        attachmentId: `sha256:${'a'.repeat(64)}`,
+        mediaType: 'image/png' as const,
+        bytes: 3,
+        width: 1,
+        height: 1,
+      },
+    ]);
+    const attachments = { saveImages };
+    const runtimeModels = [
+      {
+        provider: 'deepseek-official',
+        id: 'runtime-text',
+        name: 'Runtime text',
+        description: 'Discovered text model',
+        inputModalities: ['text'],
+      },
+      {
+        provider: 'deepseek-official',
+        id: 'runtime-vision',
+        name: 'Runtime vision',
+        description: 'Discovered vision model',
+        inputModalities: ['text', 'image'],
+      },
+    ];
+    const llm = {
+      listModels: vi.fn(async () => runtimeModels),
+    };
+    const context: AdapterContext = {
+      agents: {
+        async create(options) {
+          const agentContext: Parameters<typeof options.setup>[0] = {
+            on: () => () => undefined,
+            plugin: () => ({ await: () => Promise.resolve() }),
+            loader: {
+              import: () => Promise.resolve({}),
+              unwrapExports: (exports) => exports,
+            },
+          };
+          await options.setup(agentContext);
+          const agent: TestAgent = {
+            id: options.sessionId,
+            ctx: agentContext,
+            session: {
+              id: options.sessionId,
+              header: { id: options.sessionId },
+              events: [],
+              append: vi.fn(),
+            },
+            followup: (message) => queuedMessages.push(message),
+            cancel: vi.fn(),
+            whenIdle: () => Promise.resolve(),
+          };
+          agents.set(agent.id, agent);
+          return { agent, dispose: () => Promise.resolve() };
+        },
+        get: (sessionId) => agents.get(sessionId),
+      },
+      permissionPresets: {
+        names: ['read-only', 'workspace-write', 'danger-full-access'],
+        defaultPreset: 'workspace-write',
+        current: () => 'workspace-write',
+        set: vi.fn(),
+      },
+      agentPresets: {
+        defaultId: 'standard',
+        list: async () => [{ id: 'standard' }],
+        mount: async (_agentContext, id = 'standard') => ({ id }),
+        recompose: async (_agentContext, id) => ({ id }),
+      },
+      logger: { warn: vi.fn() },
+      on: () => () => undefined,
+      get: (service) => {
+        if (service === 'attachments') return attachments;
+        if (service === 'llm') return llm;
+        return undefined;
+      },
+      effect: (register) => {
+        disposers.push(register());
+      },
+    };
+
+    apply(context, { stream: streams.agent, model: 'runtime-vision' });
+    const client = new ClientSideConnection(
+      () => ({
+        requestPermission: async () => ({ outcome: { outcome: 'cancelled' as const } }),
+        sessionUpdate: async () => undefined,
+      }),
+      streams.client
+    );
+    const initialized = await client.initialize({
+      protocolVersion: PROTOCOL_VERSION,
+      clientCapabilities: {},
+    });
+    expect(initialized.agentCapabilities.promptCapabilities.image).toBe(true);
+    const session = await client.newSession({ cwd: process.cwd(), mcpServers: [] });
+    expect(selectOption(session.configOptions, 'model')).toMatchObject({
+      currentValue: 'runtime-vision',
+      options: [
+        {
+          value: 'runtime-text',
+          name: 'Runtime text',
+          description: 'Discovered text model',
+        },
+        {
+          value: 'runtime-vision',
+          name: 'Runtime vision',
+          description: 'Discovered vision model',
+        },
+      ],
+    });
+    expect(
+      (
+        session as typeof session & {
+          models: {
+            currentModelId: string;
+            availableModels: Array<{ modelId: string }>;
+          };
+        }
+      ).models
+    ).toMatchObject({
+      currentModelId: 'runtime-vision',
+      availableModels: [{ modelId: 'runtime-text' }, { modelId: 'runtime-vision' }],
+    });
+    expect(llm.listModels).toHaveBeenCalledWith('deepseek-official');
+
+    await client.prompt({
+      sessionId: session.sessionId,
+      prompt: [
+        { type: 'text', text: 'What is shown? ' },
+        { type: 'image', data: 'AQID', mimeType: 'image/png' },
+        { type: 'text', text: 'Be concise.' },
+      ],
+    });
+    expect(saveImages).toHaveBeenCalledWith([
+      { data: Uint8Array.of(1, 2, 3), mediaType: 'image/png' },
+    ]);
+    expect(queuedMessages).toEqual([
+      expect.objectContaining({
+        role: 'user',
+        content: [
+          { type: 'text', text: 'What is shown? ' },
+          {
+            type: 'image',
+            attachment: {
+              attachmentId: `sha256:${'a'.repeat(64)}`,
+              mediaType: 'image/png',
+              bytes: 3,
+              width: 1,
+              height: 1,
+            },
+          },
+          { type: 'text', text: 'Be concise.' },
+        ],
+      }),
+    ]);
+
+    await client.setSessionConfigOption({
+      sessionId: session.sessionId,
+      configId: 'model',
+      value: 'runtime-text',
+    });
+    await expect(
+      client.prompt({
+        sessionId: session.sessionId,
+        prompt: [{ type: 'image', data: 'AQID', mimeType: 'image/png' }],
+      })
+    ).rejects.toThrow(/does not support image input/u);
+    expect(saveImages).toHaveBeenCalledTimes(1);
+  });
+
   it('streams Harness reasoning and compaction lifecycle updates', async () => {
     type AdapterContext = Parameters<typeof apply>[0];
     type TestAgent = NonNullable<ReturnType<AdapterContext['agents']['get']>>;
@@ -469,7 +663,7 @@ describe('DeepSeek Harness ACP adapter', () => {
         globalListeners.set(event, listener as Listener);
         return () => globalListeners.delete(event);
       },
-      get: () => undefined,
+      get: testHarnessService,
       effect: (register) => {
         disposers.push(register());
       },
@@ -705,7 +899,7 @@ describe('DeepSeek Harness ACP adapter', () => {
         globalListeners.set(event, listener as Listener);
         return () => globalListeners.delete(event);
       },
-      get: () => undefined,
+      get: testHarnessService,
       effect: (register) => {
         disposers.push(register());
       },

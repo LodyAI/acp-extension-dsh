@@ -16,10 +16,17 @@ export declare const DEEPSEEK_HARNESS_MODELS: readonly [{
     readonly modelId: "deepseek-v4-flash";
     readonly name: "DeepSeek-V4-Flash";
     readonly description: "Faster DeepSeek Harness coding model.";
+    readonly inputModalities: readonly ["text"];
 }, {
     readonly modelId: "deepseek-v4-pro";
     readonly name: "DeepSeek-V4-Pro";
     readonly description: "More capable DeepSeek Harness coding model.";
+    readonly inputModalities: readonly ["text"];
+}, {
+    readonly modelId: "deepseek-v4-flash-vision-exp";
+    readonly name: "DeepSeek-V4-Flash-Vision-Exp";
+    readonly description: "Experimental multimodal DeepSeek model with image understanding.";
+    readonly inputModalities: readonly ["text", "image"];
 }];
 export declare const DEEPSEEK_HARNESS_REASONING_OPTIONS: readonly [{
     readonly value: "off";
