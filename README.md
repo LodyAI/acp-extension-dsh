@@ -10,6 +10,11 @@ Streamable HTTP MCP servers into each Harness Agent scope. Harness
 continues to own model execution, sandbox enforcement, persistence, preset
 composition, tool execution, and one-shot approvals.
 
+The adapter advertises Core's `_meta.lody.compaction` capability and translates
+Harness `compaction/start` and `compaction/end` events into a standard ACP tool
+lifecycle carrying `_meta.lody.activity`. Manual and automatic compaction remain
+distinguishable, and failed compactions keep the Harness error reason.
+
 ACP model choices are discovered from Harness when each session is created and
 returned through both the standard `model` config option and the legacy ACP
 `models` response. The generated profile does not pin a model catalog, so new

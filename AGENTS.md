@@ -49,6 +49,10 @@ Forward `assistant/chunk` reasoning deltas immediately as ACP thought chunks and
 separator. Harness may retry after emitting them, and the adapter intentionally does
 not retract or deduplicate those already-visible thoughts; do not replay final reasoning
 blocks.
+Translate Harness's durable `compaction/start` / `compaction/end` bracket into one
+standard ACP tool-call lifecycle. Compaction meaning belongs only in the shared
+`_meta.lody.activity` contract from `acp-extension-core`; manual compaction has a
+`null` Harness turn owner and automatic compaction has a numeric owner.
 
 ## Checks
 
