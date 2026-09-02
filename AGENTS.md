@@ -27,9 +27,9 @@ Harness. Keep it usable without importing Lody packages.
   Keep the SQLite session-query service mounted with `openAt: never`: this ACP
   composition needs its exact-read contract but exposes no full-text search,
   and public Node builds do not reliably include SQLite FTS5.
-  The `0.1.1-rc.1` package family has a cyclic same-version peer graph that npm 10
-  mis-resolves when every DSH peer is explicitly pinned; npx hosts must use
-  `--force`, not `--legacy-peer-deps`, so external Cordis peers are still installed.
+  The `0.1.1-rc.2` package family cold-installs under npm 10 with the complete
+  same-version closure. Keep the closure exact and do not add `--force` or
+  `--legacy-peer-deps`; either would hide a future peer-graph regression.
 - `src/capabilities.ts` metadata is authoritative for built-in preset labels exposed
   through ACP. Harness runtime metadata remains authoritative for user presets.
 - Hosts own installation caches, data-directory selection, process supervision,

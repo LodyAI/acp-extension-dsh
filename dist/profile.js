@@ -1,15 +1,15 @@
 export const ACP_EXTENSION_DSH_VERSION = '0.1.0';
-export const DEEPSEEK_HARNESS_VERSION = '0.1.1-rc.1';
+export const DEEPSEEK_HARNESS_VERSION = '0.1.1-rc.2';
 export const ACP_EXTENSION_DSH_PROFILE_REVISION = 'v5';
 export const ACP_EXTENSION_DSH_SESSION_ROOT_ENV = 'ACP_EXTENSION_DSH_SESSION_ROOT';
 export const ACP_EXTENSION_DSH_QUERY_PATH_ENV = 'ACP_EXTENSION_DSH_QUERY_PATH';
 export const DEEPSEEK_HARNESS_DEFAULT_SESSION_COMPRESSION = 'zstd';
 export const ACP_EXTENSION_DSH_CAPABILITY_SOURCE_VERSION = `acp-extension-dsh@${ACP_EXTENSION_DSH_VERSION}:dsh@${DEEPSEEK_HARNESS_VERSION}:profile-${ACP_EXTENSION_DSH_PROFILE_REVISION}`;
 // Keep the ACP entry package first. Hosts use its binary to launch the explicit
-// composition below. The official all-in-one CLI is deliberately not installed:
-// its telemetry dependency is not required by ACP and currently has no matching
-// published OpenTelemetry release. Every package used by the host plane or one
-// of the four shipped Agent presets is pinned to the same Harness release.
+// composition below. The official all-in-one product CLI is deliberately not
+// installed: this ACP host owns a smaller immutable composition and must not
+// inherit product UI or telemetry packages. Every package used by the host plane
+// or one of the four shipped Agent presets is pinned to the same Harness release.
 export const DEEPSEEK_HARNESS_NPX_PACKAGES = [
     '@deepseek-ai/dsh-acp-demo',
     '@deepseek-ai/dsh-agent-spine-demo',

@@ -10,7 +10,7 @@ import {
 
 describe('DeepSeek Harness profile', () => {
   it('pins the explicit ACP host and Agent preset package closure', () => {
-    expect(DEEPSEEK_HARNESS_VERSION).toBe('0.1.1-rc.1');
+    expect(DEEPSEEK_HARNESS_VERSION).toBe('0.1.1-rc.2');
     expect(new Set(DEEPSEEK_HARNESS_NPX_PACKAGES).size).toBe(DEEPSEEK_HARNESS_NPX_PACKAGES.length);
     expect(DEEPSEEK_HARNESS_NPX_PACKAGES[0]).toBe('@deepseek-ai/dsh-acp-demo');
     expect(DEEPSEEK_HARNESS_NPX_PACKAGES).toEqual(
