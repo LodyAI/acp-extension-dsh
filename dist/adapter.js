@@ -75,10 +75,7 @@ function resolveAdapterConfig(config) {
         ...(config?.stream ? { stream: config.stream } : {}),
     };
 }
-async function loadHarnessModels(ctx, provider, selectedModel) {
-    const llm = ctx.get('llm');
-    if (!llm)
-        throw new Error('acp-extension-dsh: no Harness LLM catalog is mounted');
+async function loadHarnessModels(llm, provider, selectedModel) {
     const listed = await llm.listModels(provider);
     const modelIds = [];
     const ids = new Set();
@@ -105,21 +102,7 @@ async function resolveHarnessModel(llm, provider, modelId, signal) {
     if (model.provider !== provider || model.id !== modelId || !model.name?.trim()) {
         throw new Error(`acp-extension-dsh: invalid exact model metadata for ${JSON.stringify(provider)} / ${JSON.stringify(modelId)}`);
     }
-    return {
-        ...model,
-        name: model.name,
-        ...(model.inputModalities ? { inputModalities: [...model.inputModalities] } : {}),
-        ...(model.reasoning
-            ? {
-                reasoning: {
-                    efforts: model.reasoning.efforts.map((effort) => ({ ...effort })),
-                    ...(model.reasoning.defaultEffort
-                        ? { defaultEffort: model.reasoning.defaultEffort }
-                        : {}),
-                },
-            }
-            : {}),
-    };
+    return model;
 }
 async function loadMcpClientPlugin(agentContext) {
     const module = agentContext.loader.unwrapExports(await agentContext.loader.import(MCP_CLIENT_PACKAGE));
@@ -208,12 +191,9 @@ async function mountMcpServers(agentContext, servers, serverNames, cwd) {
     });
     await Promise.all(handles.map((handle) => handle.await()));
 }
-function cloneSelection(selection) {
-    return { ...selection };
-}
 function installModelSelection(agentContext, selection) {
     agentContext.on('system-prompt/assemble', async (_assembly, _context, next) => {
-        const selected = cloneSelection(selection.current);
+        const selected = { ...selection.current };
         const assembled = await next();
         selection.assembled = selected;
         return {
@@ -329,14 +309,10 @@ function modeState(record) {
         })),
     };
 }
-function modelSupportsImages(models, modelId) {
-    return models.some((model) => model.id === modelId &&
-        model.inputModalities?.includes('image'));
-}
 function supportsAcpImagePrompts(attachments, models) {
     return (attachments !== undefined &&
         attachments.imageLimits.mediaTypes.some((mediaType) => IMAGE_MEDIA_TYPES.includes(mediaType)) &&
-        models.some((model) => modelSupportsImages(models, model.id)));
+        models.some((model) => model.inputModalities?.includes('image')));
 }
 function resolveReasoningEffort(model, requested) {
     const reasoning = model.reasoning;
@@ -353,11 +329,11 @@ function resolveReasoningEffort(model, requested) {
     return effort;
 }
 function permissionState(ctx, currentMode) {
-    const ids = new Set(ctx.permissionPresets.names);
     const options = ctx.permissionPresets.names.map((mode) => ctx.permissionPresets.optionOf(mode));
-    if (!ids.has(currentMode))
+    if (!ctx.permissionPresets.names.includes(currentMode)) {
         options.push(ctx.permissionPresets.optionOf(currentMode));
-    return { ids, options };
+    }
+    return options;
 }
 function imageMediaType(value) {
     return IMAGE_MEDIA_TYPES.includes(value)
@@ -492,22 +468,6 @@ function createUserMessage(id, content) {
         source: Object.freeze({ kind: 'user' }),
     });
 }
-function turnEndToStopReason(reason) {
-    switch (reason.kind) {
-        case 'completed':
-            return 'end_turn';
-        case 'max-tokens':
-            return 'max_tokens';
-        case 'interrupted':
-            return 'cancelled';
-        case 'aborted':
-        case 'blocked':
-        case 'error':
-            return 'end_turn';
-        default:
-            return 'end_turn';
-    }
-}
 function errorChain(value) {
     const seen = new Set();
     const render = (current) => {
@@ -562,6 +522,10 @@ export function apply(ctx, rawConfig) {
     if (ctx.permissionPresets.names.length === 0) {
         throw new Error('acp-extension-dsh: no permission presets are composed');
     }
+    const llm = ctx.get('llm');
+    if (!llm)
+        throw new Error('acp-extension-dsh: no Harness LLM catalog is mounted');
+    const attachments = ctx.get('attachments');
     const assertOpen = () => {
         if (closed)
             throw internalError('the ACP bridge has been disposed');
@@ -617,7 +581,7 @@ export function apply(ctx, rawConfig) {
             }
             else {
                 const end = inflight.endReason;
-                inflight.resolve(end ? (end.kind === 'max-tokens' ? 'end_turn' : turnEndToStopReason(end)) : 'cancelled');
+                inflight.resolve(end ? (end.kind === 'interrupted' ? 'cancelled' : 'end_turn') : 'cancelled');
             }
         })().catch((error) => {
             if (record.inflight !== inflight)
@@ -630,10 +594,8 @@ export function apply(ctx, rawConfig) {
         const permissionMode = ctx.permissionPresets.current(record.agent.session.events);
         if (permissionMode === record.permissionMode)
             return false;
-        const state = permissionState(ctx, permissionMode);
         record.permissionMode = permissionMode;
-        record.permissionModeIds = state.ids;
-        record.permissionOptions = state.options;
+        record.permissionOptions = permissionState(ctx, permissionMode);
         return true;
     };
     const schedulePermissionSync = (record) => {
@@ -724,7 +686,6 @@ export function apply(ctx, rawConfig) {
             }
             else if (event.type === 'assistant/message') {
                 const inflight = record.inflight?.turn === event.data.turn ? record.inflight : undefined;
-                const attachments = ctx.get('attachments');
                 enqueueOutput(record, async () => {
                     for (const block of event.data.message?.content ?? []) {
                         const content = await assistantBlockToAcp(block, attachments);
@@ -819,16 +780,14 @@ export function apply(ctx, rawConfig) {
     const setPermissionMode = (record, modeId) => {
         if (modeId === record.permissionMode)
             return;
-        assertAllowed(modeId, record.permissionModeIds, 'permission mode');
+        assertAllowed(modeId, new Set(ctx.permissionPresets.names), 'permission mode');
         ctx.permissionPresets.set(record.agent.session, modeId);
         const permissionMode = ctx.permissionPresets.current(record.agent.session.events);
         if (permissionMode !== modeId) {
             throw internalError(`permission preset ${JSON.stringify(modeId)} did not become the effective mode`);
         }
         record.permissionMode = permissionMode;
-        const state = permissionState(ctx, permissionMode);
-        record.permissionModeIds = state.ids;
-        record.permissionOptions = state.options;
+        record.permissionOptions = permissionState(ctx, permissionMode);
     };
     const setConfigOption = (record, params) => {
         const value = requireSelectValue(params);
@@ -857,9 +816,6 @@ export function apply(ctx, rawConfig) {
             });
         }
         else if (params.configId === MODEL_CONFIG_ID) {
-            const llm = ctx.get('llm');
-            if (!llm)
-                throw internalError('no Harness LLM catalog is mounted');
             return resolveHarnessModel(llm, record.selection.current.provider, value)
                 .then((model) => {
                 const index = record.models.findIndex((candidate) => candidate.id === value);
@@ -906,8 +862,8 @@ export function apply(ctx, rawConfig) {
         conn = connection;
         return {
             async initialize(_params) {
-                const models = await loadHarnessModels(ctx, config.provider, config.model);
-                imagePromptEnabled = supportsAcpImagePrompts(ctx.get('attachments'), models);
+                const models = await loadHarnessModels(llm, config.provider, config.model);
+                imagePromptEnabled = supportsAcpImagePrompts(attachments, models);
                 return {
                     protocolVersion: PROTOCOL_VERSION,
                     agentInfo: { name: 'acp-extension-dsh', version: ACP_EXTENSION_DSH_VERSION },
@@ -932,7 +888,7 @@ export function apply(ctx, rawConfig) {
                 validateSessionParams(params);
                 let models;
                 try {
-                    models = await loadHarnessModels(ctx, config.provider, config.model);
+                    models = await loadHarnessModels(llm, config.provider, config.model);
                 }
                 catch (error) {
                     throw internalError(`failed to list models: ${errorChain(error)}`);
@@ -988,13 +944,10 @@ export function apply(ctx, rawConfig) {
                     throw internalError('connection closed during session/new');
                 }
                 let permissionMode;
-                let permissionModeIds;
                 let permissionOptions;
                 try {
                     permissionMode = ctx.permissionPresets.current(handle.agent.session.events);
-                    const state = permissionState(ctx, permissionMode);
-                    permissionModeIds = state.ids;
-                    permissionOptions = state.options;
+                    permissionOptions = permissionState(ctx, permissionMode);
                 }
                 catch (error) {
                     await dispose();
@@ -1005,7 +958,6 @@ export function apply(ctx, rawConfig) {
                     dispose,
                     selection,
                     permissionMode,
-                    permissionModeIds,
                     permissionOptions,
                     agentPreset: mountedPreset,
                     agentPresetOptions,
@@ -1036,10 +988,6 @@ export function apply(ctx, rawConfig) {
                 if (ctx.agents.get(record.agent.id) !== record.agent) {
                     throw internalError('prompt was not queued: the agent was disposed outside the bridge');
                 }
-                const attachments = ctx.get('attachments');
-                const llm = ctx.get('llm');
-                if (!llm)
-                    throw internalError('no Harness LLM catalog is mounted');
                 const messageId = randomUUID();
                 let resolvePrompt;
                 let rejectPrompt;
@@ -1057,7 +1005,6 @@ export function apply(ctx, rawConfig) {
                     reject: rejectPrompt,
                     messageQueued: false,
                     admissionDone,
-                    finishAdmission,
                     admissionController,
                     cancelRequested: false,
                     settlementStarted: false,
@@ -1089,7 +1036,7 @@ export function apply(ctx, rawConfig) {
                     admissionError = error;
                 }
                 finally {
-                    inflight.finishAdmission();
+                    finishAdmission();
                 }
                 if (inflight.cancelRequested) {
                     settleAfterQuiescence(record, inflight);
