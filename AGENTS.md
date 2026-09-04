@@ -9,11 +9,20 @@ Harness. Keep it usable without importing Lody packages.
   permission-preset selection, blank-session Agent preset composition, and
   session-scoped mounting of ACP stdio/HTTP servers through `dsh-mcp-client`.
 - `src/capabilities.ts` owns the static preflight metadata shared with host UIs.
-  Each ACP session must instead derive its model selector, legacy `models`
-  response, and image admission from the Harness LLM catalog returned by
-  `ctx.llm.listModels()`. Do not override that catalog in the generated profile.
-  Persist accepted image bytes through the Harness attachment service before
-  queuing the user message.
+  Each ACP session must instead derive its model selector from `ctx.llm.listModels()`,
+  exact model/reasoning metadata and image admission from `ctx.llm.resolveModelInfo()`,
+  and permission labels/options from `ctx.permissionPresets`. The LLM catalog is
+  advisory: resolve and expose the configured model even when it is unlisted, and
+  never reject a model switch only because it is absent from the catalog. Do not
+  pin a default catalog in the generated profile; a host may explicitly replace it
+  through `ACP_EXTENSION_DSH_MODELS` as a JSON string array of model ids, with the
+  first id becoming the initial ACP model. Permission knob events can move
+  a session to the derived `custom` state outside ACP, so keep both ACP mode and
+  config-option state synchronized from the durable Harness events.
+  Advertise image input only with a compatible Harness attachment store, persist
+  accepted image bytes before queuing the user message, and re-read committed
+  assistant images for ACP output. Prompt completion and cancellation keep the
+  slot owned until admission, Agent idle, and ordered output delivery quiesce.
 - `src/profile.ts` owns the pinned Harness version, explicit npx package closure,
   and ACP host-plane composition. Keep every transitive DSH dependency and peer
   package in that exact-version closure; Harness caret ranges must never let npm

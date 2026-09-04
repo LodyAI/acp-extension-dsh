@@ -1,6 +1,6 @@
 {
   "name": "acp-extension-dsh",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "ACP session controls and coding profile for DeepSeek Harness",
   "type": "module",
   "main": "./dist/index.js",

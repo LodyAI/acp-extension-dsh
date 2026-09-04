@@ -21,7 +21,64 @@ const DEFAULT_LLM_CATALOG = {
       description: model.description,
       inputModalities: model.inputModalities,
     })),
+  resolveModelInfo: async (provider: string, modelId: string) => {
+    const catalogModel = DEEPSEEK_HARNESS_MODELS.find((model) => model.modelId === modelId);
+    return {
+      provider,
+      id: modelId,
+      name: catalogModel?.name ?? modelId,
+      description: catalogModel?.description,
+      inputModalities: catalogModel?.inputModalities ?? ['text'],
+      ...(modelId === 'no-reasoning'
+        ? {}
+        : {
+            reasoning: {
+              efforts: [
+                { id: 'off', name: 'Off' },
+                { id: 'low', name: 'Low' },
+                { id: 'high', name: 'High' },
+                { id: 'max', name: 'Max' },
+              ],
+              defaultEffort: 'max',
+            },
+          }),
+    };
+  },
 };
+
+const PERMISSION_OPTIONS = {
+  'read-only': {
+    value: 'read-only',
+    name: 'Read-only',
+    description: 'Read inside the workspace',
+  },
+  'workspace-write': {
+    value: 'workspace-write',
+    name: 'Workspace write',
+    description: 'Read and write inside the workspace',
+  },
+  'danger-full-access': {
+    value: 'danger-full-access',
+    name: 'Full access',
+    description: 'Unrestricted access',
+  },
+  reviewed: {
+    value: 'reviewed',
+    name: 'Reviewed writes',
+    description: 'Use a deployment-defined review policy',
+  },
+  custom: {
+    value: 'custom',
+    name: 'Custom',
+    description: 'Current sandbox and approval settings do not match a preset.',
+  },
+} as const;
+
+function permissionOption(name: string) {
+  const option = PERMISSION_OPTIONS[name as keyof typeof PERMISSION_OPTIONS];
+  if (!option) throw new Error(`unknown permission option: ${name}`);
+  return option;
+}
 
 function testHarnessService(name: string): unknown {
   return name === 'llm' ? DEFAULT_LLM_CATALOG : undefined;
@@ -60,9 +117,12 @@ describe('DeepSeek Harness ACP adapter', () => {
   it('applies model, reasoning-effort, and permission selections to Harness state', async () => {
     const streams = connectedStreams();
     const scopedListeners = new Map<string, Listener>();
+    const harnessListeners = new Map<string, Listener>();
     const permissionSwitches: string[] = [];
     const agentPresetSwitches: string[] = [];
+    const sessionUpdates: Array<{ sessionId: string; update: Record<string, unknown> }> = [];
     let currentPermission = 'workspace-write';
+    let createdHarnessSession: unknown;
 
     const context: Parameters<typeof apply>[0] = {
       agents: {
@@ -90,6 +150,7 @@ describe('DeepSeek Harness ACP adapter', () => {
               this.events.push({ type, data });
             },
           };
+          createdHarnessSession = session;
           const agent = {
             id: options.sessionId,
             ctx: agentContext,
@@ -103,9 +164,10 @@ describe('DeepSeek Harness ACP adapter', () => {
         get: () => undefined,
       },
       permissionPresets: {
-        names: ['read-only', 'workspace-write', 'danger-full-access'],
+        names: ['read-only', 'workspace-write', 'danger-full-access', 'reviewed'],
         defaultPreset: 'workspace-write',
         current: () => currentPermission,
+        optionOf: permissionOption,
         set: (_session, mode) => {
           currentPermission = mode;
           permissionSwitches.push(mode);
@@ -129,10 +191,11 @@ describe('DeepSeek Harness ACP adapter', () => {
       },
       logger: { warn: vi.fn() },
       on<TArgs extends unknown[]>(
-        _event: string,
-        _listener: (...args: TArgs) => unknown
+        event: string,
+        listener: (...args: TArgs) => unknown
       ): () => void {
-        return () => undefined;
+        harnessListeners.set(event, listener as Listener);
+        return () => harnessListeners.delete(event);
       },
       get: testHarnessService,
       effect: (register) => {
@@ -149,7 +212,9 @@ describe('DeepSeek Harness ACP adapter', () => {
     const client = new ClientSideConnection(
       () => ({
         requestPermission: async () => ({ outcome: { outcome: 'cancelled' as const } }),
-        sessionUpdate: async () => undefined,
+        sessionUpdate: async (notification) => {
+          sessionUpdates.push(notification as (typeof sessionUpdates)[number]);
+        },
       }),
       streams.client
     );
@@ -188,17 +253,64 @@ describe('DeepSeek Harness ACP adapter', () => {
     const effortResponse = await client.setSessionConfigOption({
       sessionId: created.sessionId,
       configId: 'reasoning_effort',
-      value: 'off',
+      value: 'low',
     });
-    expect(selectValue(effortResponse.configOptions, 'reasoning_effort')).toBe('off');
+    expect(selectOption(effortResponse.configOptions, 'reasoning_effort')).toMatchObject({
+      currentValue: 'low',
+      options: [
+        { value: 'off', name: 'Off' },
+        { value: 'low', name: 'Low' },
+        { value: 'high', name: 'High' },
+        { value: 'max', name: 'Max' },
+      ],
+    });
 
     const modeResponse = await client.setSessionConfigOption({
       sessionId: created.sessionId,
       configId: 'mode',
-      value: 'danger-full-access',
+      value: 'reviewed',
     });
-    expect(selectValue(modeResponse.configOptions, 'mode')).toBe('danger-full-access');
-    expect(permissionSwitches).toEqual(['danger-full-access']);
+    expect(selectOption(modeResponse.configOptions, 'mode')).toMatchObject({
+      currentValue: 'reviewed',
+      options: expect.arrayContaining([
+        {
+          value: 'reviewed',
+          name: 'Reviewed writes',
+          description: 'Use a deployment-defined review policy',
+        },
+      ]),
+    });
+    expect(permissionSwitches).toEqual(['reviewed']);
+
+    const sessionEventListener = harnessListeners.get('session/event');
+    expect(sessionEventListener).toBeDefined();
+    currentPermission = 'custom';
+    await sessionEventListener?.(createdHarnessSession, { type: 'sandbox/mode', data: {} });
+    await vi.waitFor(() => {
+      expect(sessionUpdates).toEqual(
+        expect.arrayContaining([
+          {
+            sessionId: created.sessionId,
+            update: { sessionUpdate: 'current_mode_update', currentModeId: 'custom' },
+          },
+          {
+            sessionId: created.sessionId,
+            update: expect.objectContaining({
+              sessionUpdate: 'config_option_update',
+              configOptions: expect.arrayContaining([
+                expect.objectContaining({
+                  id: 'mode',
+                  currentValue: 'custom',
+                  options: expect.arrayContaining([
+                    expect.objectContaining({ value: 'custom', name: 'Custom' }),
+                  ]),
+                }),
+              ]),
+            }),
+          },
+        ])
+      );
+    });
 
     const presetResponse = await client.setSessionConfigOption({
       sessionId: created.sessionId,
@@ -236,17 +348,35 @@ describe('DeepSeek Harness ACP adapter', () => {
     ).resolves.toMatchObject({
       provider: 'deepseek-official',
       model: 'deepseek-v4-flash',
-      reasoningEffort: 'off',
+      reasoningEffort: 'low',
       maxTokens: 4096,
     });
 
+    const unlistedModel = await client.setSessionConfigOption({
+      sessionId: created.sessionId,
+      configId: 'model',
+      value: 'gateway-model',
+    });
+    expect(selectOption(unlistedModel.configOptions, 'model')).toMatchObject({
+      currentValue: 'gateway-model',
+      options: expect.arrayContaining([
+        expect.objectContaining({ value: 'gateway-model', name: 'gateway-model' }),
+      ]),
+    });
+
+    const noReasoningModel = await client.setSessionConfigOption({
+      sessionId: created.sessionId,
+      configId: 'model',
+      value: 'no-reasoning',
+    });
+    expect(selectOption(noReasoningModel.configOptions, 'reasoning_effort')).toBeUndefined();
     await expect(
       client.setSessionConfigOption({
         sessionId: created.sessionId,
-        configId: 'model',
-        value: 'not-a-model',
+        configId: 'reasoning_effort',
+        value: 'high',
       })
-    ).rejects.toThrow(/unknown model/u);
+    ).rejects.toThrow(/does not support reasoning effort/u);
   });
 
   it('mounts ACP MCP servers in the Agent scope and releases their namespaces on close', async () => {
@@ -309,6 +439,7 @@ describe('DeepSeek Harness ACP adapter', () => {
         names: ['read-only', 'workspace-write', 'danger-full-access'],
         defaultPreset: 'workspace-write',
         current: () => 'workspace-write',
+        optionOf: permissionOption,
         set: vi.fn(),
       },
       agentPresets: {
@@ -428,17 +559,25 @@ describe('DeepSeek Harness ACP adapter', () => {
 
     const streams = connectedStreams();
     const agents = new Map<string, TestAgent>();
+    const globalListeners = new Map<string, Listener>();
+    const updates: unknown[] = [];
     const queuedMessages: unknown[] = [];
-    const saveImages = vi.fn(async () => [
-      {
-        attachmentId: `sha256:${'a'.repeat(64)}`,
-        mediaType: 'image/png' as const,
-        bytes: 3,
-        width: 1,
-        height: 1,
-      },
-    ]);
-    const attachments = { saveImages };
+    const attachmentRef = {
+      attachmentId: `sha256:${'a'.repeat(64)}`,
+      mediaType: 'image/png' as const,
+      bytes: 3,
+      width: 1,
+      height: 1,
+    };
+    const saveImages = vi.fn(async () => [attachmentRef]);
+    const attachments = {
+      imageLimits: { mediaTypes: ['image/png'] },
+      saveImages,
+      readImage: vi.fn(async (ref: Awaited<ReturnType<typeof saveImages>>[number]) => ({
+        data: Uint8Array.of(1, 2, 3),
+        ref,
+      })),
+    };
     const runtimeModels = [
       {
         provider: 'deepseek-official',
@@ -457,6 +596,18 @@ describe('DeepSeek Harness ACP adapter', () => {
     ];
     const llm = {
       listModels: vi.fn(async () => runtimeModels),
+      resolveModelInfo: vi.fn(async (provider: string, modelId: string) => {
+        const model = runtimeModels.find((candidate) => candidate.id === modelId);
+        if (!model) throw new Error(`unknown model: ${modelId}`);
+        return {
+          ...model,
+          provider,
+          reasoning: {
+            efforts: [{ id: 'off', name: 'Off' }],
+            defaultEffort: 'off',
+          },
+        };
+      }),
     };
     const context: AdapterContext = {
       agents: {
@@ -492,6 +643,7 @@ describe('DeepSeek Harness ACP adapter', () => {
         names: ['read-only', 'workspace-write', 'danger-full-access'],
         defaultPreset: 'workspace-write',
         current: () => 'workspace-write',
+        optionOf: permissionOption,
         set: vi.fn(),
       },
       agentPresets: {
@@ -501,7 +653,13 @@ describe('DeepSeek Harness ACP adapter', () => {
         recompose: async (_agentContext, id) => ({ id }),
       },
       logger: { warn: vi.fn() },
-      on: () => () => undefined,
+      on<TArgs extends unknown[]>(
+        event: string,
+        listener: (...args: TArgs) => unknown
+      ): () => void {
+        globalListeners.set(event, listener as Listener);
+        return () => globalListeners.delete(event);
+      },
       get: (service) => {
         if (service === 'attachments') return attachments;
         if (service === 'llm') return llm;
@@ -516,7 +674,9 @@ describe('DeepSeek Harness ACP adapter', () => {
     const client = new ClientSideConnection(
       () => ({
         requestPermission: async () => ({ outcome: { outcome: 'cancelled' as const } }),
-        sessionUpdate: async () => undefined,
+        sessionUpdate: async (notification) => {
+          updates.push(notification);
+        },
       }),
       streams.client
     );
@@ -552,7 +712,12 @@ describe('DeepSeek Harness ACP adapter', () => {
       ).models
     ).toMatchObject({
       currentModelId: 'runtime-vision',
-      availableModels: [{ modelId: 'runtime-text' }, { modelId: 'runtime-vision' }],
+      availableModels: expect.arrayContaining([
+        expect.objectContaining({ modelId: 'runtime-text' }),
+        expect.objectContaining({ modelId: 'runtime-text[off]' }),
+        expect.objectContaining({ modelId: 'runtime-vision' }),
+        expect.objectContaining({ modelId: 'runtime-vision[off]' }),
+      ]),
     });
     expect(llm.listModels).toHaveBeenCalledWith('deepseek-official');
 
@@ -567,6 +732,11 @@ describe('DeepSeek Harness ACP adapter', () => {
     expect(saveImages).toHaveBeenCalledWith([
       { data: Uint8Array.of(1, 2, 3), mediaType: 'image/png' },
     ]);
+    expect(llm.resolveModelInfo).toHaveBeenCalledWith(
+      'deepseek-official',
+      'runtime-vision',
+      expect.any(AbortSignal)
+    );
     expect(queuedMessages).toEqual([
       expect.objectContaining({
         role: 'user',
@@ -586,6 +756,24 @@ describe('DeepSeek Harness ACP adapter', () => {
         ],
       }),
     ]);
+
+    const sessionEvent = globalListeners.get('session/event');
+    const agent = agents.get(session.sessionId);
+    if (!sessionEvent || !agent) throw new Error('missing Harness session event listener');
+    sessionEvent(agent.session, {
+      type: 'assistant/message',
+      data: { message: { content: [{ type: 'image', attachment: attachmentRef }] } },
+    });
+    await vi.waitFor(() => {
+      expect(updates).toContainEqual({
+        sessionId: session.sessionId,
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'image', data: 'AQID', mimeType: 'image/png' },
+        },
+      });
+    });
+    expect(attachments.readImage).toHaveBeenCalledWith(attachmentRef);
 
     await client.setSessionConfigOption({
       sessionId: session.sessionId,
@@ -647,6 +835,7 @@ describe('DeepSeek Harness ACP adapter', () => {
         names: ['read-only', 'workspace-write', 'danger-full-access'],
         defaultPreset: 'workspace-write',
         current: () => 'workspace-write',
+        optionOf: permissionOption,
         set: vi.fn(),
       },
       agentPresets: {
@@ -833,6 +1022,99 @@ describe('DeepSeek Harness ACP adapter', () => {
     ]);
   });
 
+  it('keeps a cancelled prompt slot until its Harness agent is idle', async () => {
+    type AdapterContext = Parameters<typeof apply>[0];
+    type TestAgent = NonNullable<ReturnType<AdapterContext['agents']['get']>>;
+
+    const streams = connectedStreams();
+    let createdAgent: TestAgent | undefined;
+    let markQueued: (() => void) | undefined;
+    const queued = new Promise<void>((resolve) => {
+      markQueued = resolve;
+    });
+    let markIdle: (() => void) | undefined;
+    const idle = new Promise<void>((resolve) => {
+      markIdle = resolve;
+    });
+    const context: AdapterContext = {
+      agents: {
+        async create(options) {
+          const agentContext: Parameters<typeof options.setup>[0] = {
+            on: () => () => undefined,
+            plugin: () => ({ await: () => Promise.resolve() }),
+            loader: {
+              import: () => Promise.resolve({}),
+              unwrapExports: (exports) => exports,
+            },
+          };
+          await options.setup(agentContext);
+          createdAgent = {
+            id: options.sessionId,
+            ctx: agentContext,
+            session: {
+              id: options.sessionId,
+              header: { id: options.sessionId },
+              events: [],
+              append: vi.fn(),
+            },
+            followup: () => markQueued?.(),
+            cancel: vi.fn(),
+            whenIdle: () => idle,
+          };
+          return { agent: createdAgent, dispose: () => Promise.resolve() };
+        },
+        get: (sessionId) => (createdAgent?.id === sessionId ? createdAgent : undefined),
+      },
+      permissionPresets: {
+        names: ['workspace-write'],
+        defaultPreset: 'workspace-write',
+        current: () => 'workspace-write',
+        optionOf: permissionOption,
+        set: vi.fn(),
+      },
+      agentPresets: {
+        defaultId: 'standard',
+        list: async () => [{ id: 'standard' }],
+        mount: async (_agentContext, id = 'standard') => ({ id }),
+        recompose: async (_agentContext, id) => ({ id }),
+      },
+      logger: { warn: vi.fn() },
+      on: () => () => undefined,
+      get: testHarnessService,
+      effect: (register) => {
+        disposers.push(register());
+      },
+    };
+
+    apply(context, { stream: streams.agent });
+    const client = new ClientSideConnection(
+      () => ({
+        requestPermission: async () => ({ outcome: { outcome: 'cancelled' as const } }),
+        sessionUpdate: async () => undefined,
+      }),
+      streams.client
+    );
+    await client.initialize({ protocolVersion: PROTOCOL_VERSION, clientCapabilities: {} });
+    const session = await client.newSession({ cwd: process.cwd(), mcpServers: [] });
+    const firstPrompt = client.prompt({
+      sessionId: session.sessionId,
+      prompt: [{ type: 'text', text: 'first' }],
+    });
+    await queued;
+
+    await client.cancel({ sessionId: session.sessionId });
+    await expect(
+      client.prompt({
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'second' }],
+      })
+    ).rejects.toThrow(/already in flight/u);
+    expect(createdAgent?.cancel).toHaveBeenCalledWith({ kind: 'user' });
+
+    markIdle?.();
+    await expect(firstPrompt).resolves.toEqual({ stopReason: 'cancelled' });
+  });
+
   it('rejects the active ACP prompt when Harness reports an error for its turn', async () => {
     type AdapterContext = Parameters<typeof apply>[0];
     type TestAgent = NonNullable<ReturnType<AdapterContext['agents']['get']>>;
@@ -845,7 +1127,10 @@ describe('DeepSeek Harness ACP adapter', () => {
     const queued = new Promise<void>((resolve) => {
       markQueued = resolve;
     });
-    const remainsBusy = new Promise<void>(() => undefined);
+    let markIdle: (() => void) | undefined;
+    const remainsBusy = new Promise<void>((resolve) => {
+      markIdle = resolve;
+    });
 
     const context: AdapterContext = {
       agents: {
@@ -883,6 +1168,7 @@ describe('DeepSeek Harness ACP adapter', () => {
         names: ['read-only', 'workspace-write', 'danger-full-access'],
         defaultPreset: 'workspace-write',
         current: () => 'workspace-write',
+        optionOf: permissionOption,
         set: vi.fn(),
       },
       agentPresets: {
@@ -934,6 +1220,7 @@ describe('DeepSeek Harness ACP adapter', () => {
     if (!inboxClaimed || !agentError) throw new Error('missing Harness lifecycle listeners');
     inboxClaimed({ agent: createdAgent, message: queuedMessage, turn: 7 });
     agentError({ agent: createdAgent, turn: 7, error: new Error('provider failed') });
+    markIdle?.();
 
     await expect(prompt).rejects.toThrow(/turn failed: provider failed/u);
   });
