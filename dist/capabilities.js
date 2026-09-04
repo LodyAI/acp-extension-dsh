@@ -16,32 +16,9 @@ export const DEEPSEEK_HARNESS_PERMISSION_MODES = [
         description: 'Allow unrestricted file and command access without approval prompts.',
     },
 ];
-export const DEEPSEEK_HARNESS_MODELS = [
-    {
-        modelId: 'deepseek-v4-flash',
-        name: 'DeepSeek-V4-Flash',
-        description: 'Faster DeepSeek Harness coding model.',
-        inputModalities: ['text'],
-    },
-    {
-        modelId: 'deepseek-v4-pro',
-        name: 'DeepSeek-V4-Pro',
-        description: 'More capable DeepSeek Harness coding model.',
-        inputModalities: ['text'],
-    },
-    {
-        modelId: 'deepseek-v4-flash-vision-exp',
-        name: 'DeepSeek-V4-Flash-Vision-Exp',
-        description: 'Experimental multimodal DeepSeek model with image understanding.',
-        inputModalities: ['text', 'image'],
-    },
-];
-export const DEEPSEEK_HARNESS_REASONING_OPTIONS = [
-    { value: 'off', name: 'Off', description: 'Disable extended thinking' },
-    { value: 'low', name: 'Low', description: 'Use a smaller reasoning budget' },
-    { value: 'high', name: 'High', description: 'Use the standard reasoning budget' },
-    { value: 'max', name: 'Max', description: 'Use the maximum reasoning budget' },
-];
+/** Upstream DeepSeek connection settings consumed by the provider and ACP discovery. */
+export const DEEPSEEK_HARNESS_API_KEY_ENV = 'DEEPSEEK_API_KEY';
+export const DEEPSEEK_HARNESS_BASE_URL_ENV = 'DEEPSEEK_BASE_URL';
 /** Built-in agent compositions shipped by the official DeepSeek Harness CLI. */
 export const DEEPSEEK_HARNESS_AGENT_PRESETS = [
     {
@@ -65,10 +42,4 @@ export const DEEPSEEK_HARNESS_AGENT_PRESETS = [
         description: 'Standard capabilities plus runtime inspection, plugin experiments, and preset-authoring guidance.',
     },
 ];
-/**
- * Optional JSON string-array of model ids used to replace the DeepSeek
- * provider's advisory catalog. The generated host profile maps each id to a
- * DSH catalog entry and selects the first one for new ACP sessions.
- */
-export const ACP_EXTENSION_DSH_MODELS_ENV = 'ACP_EXTENSION_DSH_MODELS';
 //# sourceMappingURL=capabilities.js.map

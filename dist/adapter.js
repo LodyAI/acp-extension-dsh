@@ -10,7 +10,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { isAbsolute } from 'node:path';
 import { Readable, Writable } from 'node:stream';
 import { AgentSideConnection, ndJsonStream, PROTOCOL_VERSION, RequestError, } from '@agentclientprotocol/sdk';
-import { DEEPSEEK_HARNESS_AGENT_PRESETS } from './capabilities.js';
+import { DEEPSEEK_HARNESS_AGENT_PRESETS, DEEPSEEK_HARNESS_API_KEY_ENV, DEEPSEEK_HARNESS_BASE_URL_ENV, } from './capabilities.js';
 import { ACP_EXTENSION_DSH_VERSION } from './profile.js';
 export const name = 'acp-extension-dsh';
 // Waiting for persistence/query also preserves the upstream composite's
@@ -37,6 +37,10 @@ const MCP_CLIENT_PACKAGE = '@deepseek-ai/dsh-mcp-client';
 const MCP_TOOL_CALL_TIMEOUT_MS = 60_000;
 const MCP_SERVER_NAME_MAX_LENGTH = 32;
 const MCP_SERVER_NAME_HASH_LENGTH = 8;
+const MODEL_DISCOVERY_TIMEOUT_MS = 15_000;
+const MODEL_DISCOVERY_MAX_BYTES = 1024 * 1024;
+const MODEL_DISCOVERY_MAX_MODELS = 1_000;
+const MODEL_ID_MAX_LENGTH = 512;
 const INVALID_MCP_SERVER_NAME_CHARS = /[^A-Za-z0-9_-]/gu;
 const IMAGE_MEDIA_TYPES = [
     'image/png',
@@ -75,8 +79,13 @@ function resolveAdapterConfig(config) {
         ...(config?.stream ? { stream: config.stream } : {}),
     };
 }
-async function loadHarnessModels(llm, provider, selectedModel) {
-    const listed = await llm.listModels(provider);
+async function loadHarnessModels(llm, provider, configuredModel, endpoint) {
+    const listed = endpoint
+        ? (await discoverDeepSeekModelIds(endpoint.baseUrl, endpoint.apiKey)).map((id) => ({
+            provider,
+            id,
+        }))
+        : await llm.listModels(provider);
     const modelIds = [];
     const ids = new Set();
     for (const model of listed) {
@@ -88,12 +97,98 @@ async function loadHarnessModels(llm, provider, selectedModel) {
         ids.add(model.id);
         modelIds.push(model.id);
     }
-    // The Harness catalog is advisory. The configured route may intentionally
-    // name a gateway model that is not in it, so always resolve and expose that
-    // exact model as well instead of turning catalog membership into a whitelist.
-    if (!ids.has(selectedModel))
-        modelIds.unshift(selectedModel);
-    return Promise.all(modelIds.map((modelId) => resolveHarnessModel(llm, provider, modelId)));
+    if (endpoint && modelIds.length === 0) {
+        throw new Error('the endpoint returned no usable models');
+    }
+    // Without endpoint discovery, the Harness catalog remains advisory. An
+    // explicitly configured route may name an unlisted model.
+    if (!endpoint && !ids.has(configuredModel))
+        modelIds.unshift(configuredModel);
+    const initialModel = endpoint ? modelIds[0] : configuredModel;
+    return {
+        models: await Promise.all(modelIds.map((modelId) => resolveHarnessModel(llm, provider, modelId))),
+        initialModel,
+    };
+}
+function modelDiscoveryUrl(baseUrl) {
+    const url = new URL(baseUrl);
+    url.pathname = `${url.pathname.replace(/\/+$/u, '')}/models`;
+    url.hash = '';
+    return url;
+}
+async function readLimitedResponse(response) {
+    const declaredLength = Number(response.headers.get('content-length'));
+    if (Number.isFinite(declaredLength) && declaredLength > MODEL_DISCOVERY_MAX_BYTES) {
+        throw new Error('model discovery response is too large');
+    }
+    if (!response.body)
+        return '';
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let text = '';
+    let bytes = 0;
+    while (true) {
+        const { done, value } = await reader.read();
+        if (done)
+            break;
+        bytes += value.byteLength;
+        if (bytes > MODEL_DISCOVERY_MAX_BYTES) {
+            await reader.cancel();
+            throw new Error('model discovery response is too large');
+        }
+        text += decoder.decode(value, { stream: true });
+    }
+    return text + decoder.decode();
+}
+async function discoverDeepSeekModelIds(baseUrl, apiKey) {
+    const headers = new Headers({ accept: 'application/json' });
+    if (apiKey)
+        headers.set('authorization', `Bearer ${apiKey}`);
+    let response;
+    try {
+        response = await fetch(modelDiscoveryUrl(baseUrl), {
+            method: 'GET',
+            headers,
+            redirect: 'error',
+            signal: AbortSignal.timeout(MODEL_DISCOVERY_TIMEOUT_MS),
+        });
+    }
+    catch (error) {
+        throw new Error(`unable to request the endpoint model list: ${errorChain(error)}`, {
+            cause: error,
+        });
+    }
+    if (!response.ok) {
+        throw new Error(`model discovery failed with HTTP ${response.status}`);
+    }
+    let body;
+    try {
+        body = JSON.parse(await readLimitedResponse(response));
+    }
+    catch (error) {
+        throw new Error(`model discovery returned invalid JSON: ${errorChain(error)}`, {
+            cause: error,
+        });
+    }
+    if (typeof body !== 'object' ||
+        body === null ||
+        !('data' in body) ||
+        !Array.isArray(body.data) ||
+        body.data.length > MODEL_DISCOVERY_MAX_MODELS) {
+        throw new Error('model discovery returned an invalid OpenAI-compatible response');
+    }
+    const ids = [];
+    const seen = new Set();
+    for (const entry of body.data) {
+        if (typeof entry !== 'object' || entry === null || !('id' in entry))
+            continue;
+        const id = typeof entry.id === 'string' ? entry.id.trim() : '';
+        if (!id || id.length > MODEL_ID_MAX_LENGTH || seen.has(id))
+            continue;
+        seen.add(id);
+        ids.push(id);
+    }
+    return ids;
 }
 async function resolveHarnessModel(llm, provider, modelId, signal) {
     if (!modelId.trim())
@@ -526,6 +621,10 @@ export function apply(ctx, rawConfig) {
     if (!llm)
         throw new Error('acp-extension-dsh: no Harness LLM catalog is mounted');
     const attachments = ctx.get('attachments');
+    const baseUrl = process.env[DEEPSEEK_HARNESS_BASE_URL_ENV]?.trim();
+    const apiKey = process.env[DEEPSEEK_HARNESS_API_KEY_ENV]?.trim();
+    let modelCatalog;
+    const loadModelCatalog = () => (modelCatalog ??= loadHarnessModels(llm, config.provider, config.model, baseUrl ? { baseUrl, ...(apiKey ? { apiKey } : {}) } : undefined));
     const assertOpen = () => {
         if (closed)
             throw internalError('the ACP bridge has been disposed');
@@ -862,7 +961,7 @@ export function apply(ctx, rawConfig) {
         conn = connection;
         return {
             async initialize(_params) {
-                const models = await loadHarnessModels(llm, config.provider, config.model);
+                const { models } = await loadModelCatalog();
                 imagePromptEnabled = supportsAcpImagePrompts(attachments, models);
                 return {
                     protocolVersion: PROTOCOL_VERSION,
@@ -886,22 +985,23 @@ export function apply(ctx, rawConfig) {
             async newSession(params) {
                 assertOpen();
                 validateSessionParams(params);
-                let models;
+                let catalog;
                 try {
-                    models = await loadHarnessModels(llm, config.provider, config.model);
+                    catalog = await loadModelCatalog();
                 }
                 catch (error) {
-                    throw internalError(`failed to list models: ${errorChain(error)}`);
+                    throw internalError(`failed to discover models: ${errorChain(error)}`);
                 }
+                const { models, initialModel: initialModelId } = catalog;
                 const sessionId = randomUUID();
-                const initialModel = models.find((model) => model.id === config.model);
+                const initialModel = models.find((model) => model.id === initialModelId);
                 if (!initialModel)
-                    throw internalError('configured model metadata is unavailable');
+                    throw internalError('initial model metadata is unavailable');
                 const reasoningEffort = resolveReasoningEffort(initialModel, config.reasoningEffort);
                 const selection = {
                     current: {
                         provider: config.provider,
-                        model: config.model,
+                        model: initialModelId,
                         ...(reasoningEffort ? { reasoningEffort } : {}),
                     },
                 };
@@ -917,7 +1017,7 @@ export function apply(ctx, rawConfig) {
                     handle = await ctx.agents.create({
                         sessionId,
                         meta: { cwd: params.cwd, agentPreset: requestedPreset },
-                        agentOptions: { provider: config.provider, model: config.model },
+                        agentOptions: { provider: config.provider, model: initialModelId },
                         setup: async (agentContext) => {
                             installModelSelection(agentContext, selection);
                             mountedPreset = (await ctx.agentPresets.mount(agentContext, requestedPreset)).id;

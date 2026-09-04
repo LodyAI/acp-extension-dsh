@@ -14,9 +14,10 @@ Harness. Keep it usable without importing Lody packages.
   and permission labels/options from `ctx.permissionPresets`. The LLM catalog is
   advisory: resolve and expose the configured model even when it is unlisted, and
   never reject a model switch only because it is absent from the catalog. Do not
-  pin a default catalog in the generated profile; a host may explicitly replace it
-  through `ACP_EXTENSION_DSH_MODELS` as a JSON string array of model ids, with the
-  first id becoming the initial ACP model. Permission knob events can move
+  pin a default catalog in the generated profile. When `DEEPSEEK_BASE_URL` is set,
+  discover its OpenAI-compatible `GET /models` response once per ACP connection,
+  resolve those exact ids through Harness, and use the first as the initial model;
+  do not add a parallel host-authored model list. Permission knob events can move
   a session to the derived `custom` state outside ACP, so keep both ACP mode and
   config-option state synchronized from the durable Harness events.
   Advertise image input only with a compatible Harness attachment store, persist
