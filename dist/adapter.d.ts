@@ -1,7 +1,6 @@
 import { type Stream } from '@agentclientprotocol/sdk';
 export declare const name = "acp-extension-dsh";
 export declare const inject: string[];
-type ReasoningEffort = 'off' | 'high' | 'max';
 type HarnessTextBlock = {
     type: 'text';
     text: string;
@@ -78,6 +77,11 @@ type HarnessUserMessage = {
         kind: 'user';
     };
 };
+type HarnessPermissionOption = {
+    value: string;
+    name: string;
+    description?: string;
+};
 type HarnessAgentContext = {
     on<TArgs extends unknown[]>(event: string, listener: (...args: TArgs) => unknown): () => void;
     plugin(plugin: HarnessPlugin, config: HarnessMcpClientConfig): HarnessPluginHandle;
@@ -139,6 +143,7 @@ type HarnessContext = {
         names: readonly string[];
         defaultPreset: string;
         current(events: readonly HarnessSessionEvent[]): string;
+        optionOf(name: string): HarnessPermissionOption;
         set(session: HarnessSession, name: string): void;
     };
     agentPresets: {
@@ -157,7 +162,7 @@ type HarnessContext = {
 export type DeepSeekAcpAdapterConfig = {
     provider?: string;
     model?: string;
-    reasoningEffort?: ReasoningEffort;
+    reasoningEffort?: string;
     /** Runtime-only transport override used by unit tests. */
     stream?: Stream;
 };

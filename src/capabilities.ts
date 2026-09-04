@@ -40,6 +40,7 @@ export const DEEPSEEK_HARNESS_MODELS = [
 
 export const DEEPSEEK_HARNESS_REASONING_OPTIONS = [
   { value: 'off', name: 'Off', description: 'Disable extended thinking' },
+  { value: 'low', name: 'Low', description: 'Use a smaller reasoning budget' },
   { value: 'high', name: 'High', description: 'Use the standard reasoning budget' },
   { value: 'max', name: 'Max', description: 'Use the maximum reasoning budget' },
 ] as const;
@@ -70,3 +71,10 @@ export const DEEPSEEK_HARNESS_AGENT_PRESETS = [
       'Standard capabilities plus runtime inspection, plugin experiments, and preset-authoring guidance.',
   },
 ] as const;
+
+/**
+ * Optional JSON string-array of model ids used to replace the DeepSeek
+ * provider's advisory catalog. The generated host profile maps each id to a
+ * DSH catalog entry and selects the first one for new ACP sessions.
+ */
+export const ACP_EXTENSION_DSH_MODELS_ENV = 'ACP_EXTENSION_DSH_MODELS';

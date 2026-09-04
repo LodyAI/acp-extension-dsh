@@ -14,11 +14,23 @@ The adapter advertises Core's `_meta.lody.compaction` capability and translates
 Harness `compaction/start` and `compaction/end` events into a standard ACP tool
 lifecycle carrying `_meta.lody.activity`. Manual and automatic compaction remain
 distinguishable, and failed compactions keep the Harness error reason.
+Committed assistant images are read back through the attachment store and sent as
+ACP image blocks. Prompt completion and cancellation wait for admission, Harness
+idle, and ordered output delivery before releasing the session's prompt slot.
 
 ACP model choices are discovered from Harness when each session is created and
 returned through both the standard `model` config option and the legacy ACP
-`models` response. The generated profile does not pin a model catalog, so new
-models and their input modalities flow through from `dsh-llm-deepseek`.
+`models` response. Exact per-model metadata controls the reasoning selector and
+image admission, and the legacy response carries `model[effort]` entries so a
+host can cache the reasoning choices for every model rather than only the model
+that happened to be active during the probe. Permission choices use the composed
+Harness preset table.
+The model catalog remains advisory: an explicitly configured or selected gateway
+model is resolved and exposed even when it is not listed. The generated profile
+does not pin a default catalog, so runtime model metadata flows through from
+`dsh-llm-deepseek`. A host can set `ACP_EXTENSION_DSH_MODELS` to a JSON string
+array of model ids to replace that advisory catalog for a custom endpoint; the
+first id becomes the initial ACP model.
 
 ## Exports
 

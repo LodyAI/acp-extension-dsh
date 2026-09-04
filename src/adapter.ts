@@ -19,6 +19,7 @@ import {
   type AuthenticateRequest,
   type CancelNotification,
   type CloseSessionRequest,
+  type ContentBlock,
   type InitializeRequest,
   type InitializeResponse,
   type McpServer,
@@ -36,11 +37,7 @@ import {
   type Stream,
 } from '@agentclientprotocol/sdk';
 import type { LodyActivityMeta, LodyExtensionCapabilities } from 'acp-extension-core';
-import {
-  DEEPSEEK_HARNESS_AGENT_PRESETS,
-  DEEPSEEK_HARNESS_PERMISSION_MODES,
-  DEEPSEEK_HARNESS_REASONING_OPTIONS,
-} from './capabilities.js';
+import { DEEPSEEK_HARNESS_AGENT_PRESETS } from './capabilities.js';
 import { ACP_EXTENSION_DSH_VERSION } from './profile.js';
 
 export const name = 'acp-extension-dsh';
@@ -57,12 +54,10 @@ export const inject = [
   'sessionQuery',
 ];
 
-type ReasoningEffort = 'off' | 'high' | 'max';
-
 type ModelSelection = {
   provider: string;
   model: string;
-  reasoningEffort: ReasoningEffort;
+  reasoningEffort?: string;
 };
 
 type ModelSelectionRef = {
@@ -145,9 +140,14 @@ type HarnessUserMessage = {
 };
 
 type HarnessAttachmentStore = {
+  imageLimits: { mediaTypes: readonly string[] };
   saveImages(
     images: readonly { data: Uint8Array; mediaType: HarnessImageMediaType }[]
   ): Promise<readonly HarnessImageAttachmentRef[]>;
+  readImage(ref: HarnessImageAttachmentRef): Promise<{
+    data: Uint8Array;
+    ref: HarnessImageAttachmentRef;
+  }>;
 };
 
 type HarnessCatalogModel = {
@@ -158,8 +158,33 @@ type HarnessCatalogModel = {
   inputModalities?: readonly string[];
 };
 
+type HarnessReasoningEffort = {
+  id: string;
+  name: string;
+  description?: string;
+};
+
+type HarnessResolvedModel = Omit<HarnessCatalogModel, 'name'> & {
+  name: string;
+  reasoning?: {
+    efforts: readonly HarnessReasoningEffort[];
+    defaultEffort?: string;
+  };
+};
+
 type HarnessLlmCatalog = {
   listModels(provider: string): Promise<readonly HarnessCatalogModel[]>;
+  resolveModelInfo(
+    provider: string,
+    model: string,
+    signal?: AbortSignal
+  ): Promise<HarnessResolvedModel>;
+};
+
+type HarnessPermissionOption = {
+  value: string;
+  name: string;
+  description?: string;
 };
 
 type HarnessAgentContext = {
@@ -225,6 +250,7 @@ type HarnessContext = {
     names: readonly string[];
     defaultPreset: string;
     current(events: readonly HarnessSessionEvent[]): string;
+    optionOf(name: string): HarnessPermissionOption;
     set(session: HarnessSession, name: string): void;
   };
   agentPresets: {
@@ -244,7 +270,7 @@ type HarnessContext = {
 export type DeepSeekAcpAdapterConfig = {
   provider?: string;
   model?: string;
-  reasoningEffort?: ReasoningEffort;
+  reasoningEffort?: string;
   /** Runtime-only transport override used by unit tests. */
   stream?: Stream;
 };
@@ -252,16 +278,24 @@ export type DeepSeekAcpAdapterConfig = {
 type ResolvedAdapterConfig = {
   provider: string;
   model: string;
-  reasoningEffort: ReasoningEffort;
+  reasoningEffort?: string;
   stream?: Stream;
 };
 
 type InflightPrompt = {
   resolve(reason: StopReason): void;
   reject(error: Error): void;
-  messageId: string;
+  messageId?: string;
+  messageQueued: boolean;
   turn?: number;
   endReason?: HarnessTurnEndReason;
+  admissionDone: Promise<void>;
+  finishAdmission(): void;
+  admissionController: AbortController;
+  cancelRequested: boolean;
+  settlementStarted: boolean;
+  outputError?: Error;
+  agentError?: Error;
 };
 
 type SessionRecord = {
@@ -269,10 +303,14 @@ type SessionRecord = {
   dispose(): Promise<void>;
   selection: ModelSelectionRef;
   permissionMode: string;
+  permissionModeIds: Set<string>;
+  permissionOptions: HarnessPermissionOption[];
   agentPreset: string;
   agentPresetOptions: HarnessAgentPreset[];
-  models: HarnessCatalogModel[];
+  models: HarnessResolvedModel[];
   started: boolean;
+  outputTail: Promise<void>;
+  permissionSyncQueued?: boolean;
   inflight?: InflightPrompt;
 };
 
@@ -295,6 +333,7 @@ const MODEL_CONFIG_ID = 'model';
 const MODE_CONFIG_ID = 'mode';
 const REASONING_EFFORT_CONFIG_ID = 'reasoning_effort';
 const AGENT_PRESET_CONFIG_ID = 'agent_preset';
+const PERMISSION_EVENT_TYPES = new Set(['permission/preset', 'sandbox/mode', 'approval/policy']);
 const MCP_CLIENT_PACKAGE = '@deepseek-ai/dsh-mcp-client';
 const MCP_TOOL_CALL_TIMEOUT_MS = 60_000;
 const MCP_SERVER_NAME_MAX_LENGTH = 32;
@@ -319,13 +358,6 @@ const IMAGE_ADMISSION_ERROR_CODES = new Set([
   'IMAGE_DIMENSION_TOO_LARGE',
 ]);
 
-const PERMISSION_MODE_IDS = new Set<string>(
-  DEEPSEEK_HARNESS_PERMISSION_MODES.map((mode) => mode.id)
-);
-const REASONING_EFFORT_IDS = new Set<string>(
-  DEEPSEEK_HARNESS_REASONING_OPTIONS.map((effort) => effort.value)
-);
-
 function invalidParams(detail: string): RequestError {
   return RequestError.invalidParams(undefined, detail);
 }
@@ -341,28 +373,23 @@ function nonEmptyString(value: unknown, fallback: string): string {
 function resolveAdapterConfig(config: DeepSeekAcpAdapterConfig | undefined): ResolvedAdapterConfig {
   const provider = nonEmptyString(config?.provider, 'deepseek-official');
   const model = nonEmptyString(config?.model, 'deepseek-v4-pro');
-  const reasoningEffort = config?.reasoningEffort ?? 'max';
-  if (!REASONING_EFFORT_IDS.has(reasoningEffort)) {
-    throw new Error(
-      `acp-extension-dsh: unsupported reasoning effort ${JSON.stringify(reasoningEffort)}`
-    );
-  }
   return {
     provider,
     model,
-    reasoningEffort,
+    ...(config?.reasoningEffort ? { reasoningEffort: config.reasoningEffort } : {}),
     ...(config?.stream ? { stream: config.stream } : {}),
   };
 }
 
 async function loadHarnessModels(
   ctx: HarnessContext,
-  provider: string
-): Promise<HarnessCatalogModel[]> {
+  provider: string,
+  selectedModel: string
+): Promise<HarnessResolvedModel[]> {
   const llm = ctx.get('llm') as HarnessLlmCatalog | undefined;
   if (!llm) throw new Error('acp-extension-dsh: no Harness LLM catalog is mounted');
   const listed = await llm.listModels(provider);
-  const models: HarnessCatalogModel[] = [];
+  const modelIds: string[] = [];
   const ids = new Set<string>();
   for (const model of listed) {
     if (model.provider !== provider || !model.id.trim()) continue;
@@ -372,12 +399,43 @@ async function loadHarnessModels(
       );
     }
     ids.add(model.id);
-    models.push({
-      ...model,
-      ...(model.inputModalities ? { inputModalities: [...model.inputModalities] } : {}),
-    });
+    modelIds.push(model.id);
   }
-  return models;
+  // The Harness catalog is advisory. The configured route may intentionally
+  // name a gateway model that is not in it, so always resolve and expose that
+  // exact model as well instead of turning catalog membership into a whitelist.
+  if (!ids.has(selectedModel)) modelIds.unshift(selectedModel);
+  return Promise.all(modelIds.map((modelId) => resolveHarnessModel(llm, provider, modelId)));
+}
+
+async function resolveHarnessModel(
+  llm: HarnessLlmCatalog,
+  provider: string,
+  modelId: string,
+  signal?: AbortSignal
+): Promise<HarnessResolvedModel> {
+  if (!modelId.trim()) throw invalidParams('model id must not be empty');
+  const model = await llm.resolveModelInfo(provider, modelId, signal);
+  if (model.provider !== provider || model.id !== modelId || !model.name?.trim()) {
+    throw new Error(
+      `acp-extension-dsh: invalid exact model metadata for ${JSON.stringify(provider)} / ${JSON.stringify(modelId)}`
+    );
+  }
+  return {
+    ...model,
+    name: model.name,
+    ...(model.inputModalities ? { inputModalities: [...model.inputModalities] } : {}),
+    ...(model.reasoning
+      ? {
+          reasoning: {
+            efforts: model.reasoning.efforts.map((effort) => ({ ...effort })),
+            ...(model.reasoning.defaultEffort
+              ? { defaultEffort: model.reasoning.defaultEffort }
+              : {}),
+          },
+        }
+      : {}),
+  };
 }
 
 async function loadMcpClientPlugin(agentContext: HarnessAgentContext): Promise<HarnessPlugin> {
@@ -523,14 +581,14 @@ function installModelSelection(
         ...withoutInheritedEffort,
         provider: selected.provider,
         model: selected.model,
-        reasoningEffort: selected.reasoningEffort,
+        ...(selected.reasoningEffort ? { reasoningEffort: selected.reasoningEffort } : {}),
       };
     }
   );
 }
 
 function configOptions(record: SessionRecord): SessionConfigOption[] {
-  return [
+  const options: SessionConfigOption[] = [
     {
       id: MODE_CONFIG_ID,
       name: 'Permission',
@@ -538,8 +596,8 @@ function configOptions(record: SessionRecord): SessionConfigOption[] {
       category: 'mode',
       type: 'select',
       currentValue: record.permissionMode,
-      options: DEEPSEEK_HARNESS_PERMISSION_MODES.map((mode) => ({
-        value: mode.id,
+      options: record.permissionOptions.map((mode) => ({
+        value: mode.value,
         name: mode.name,
         description: mode.description ?? null,
       })),
@@ -573,43 +631,114 @@ function configOptions(record: SessionRecord): SessionConfigOption[] {
       currentValue: record.selection.current.model,
       options: record.models.map((model) => ({
         value: model.id,
-        name: model.name ?? model.id,
+        name: model.name,
         description: model.description ?? null,
       })),
     },
-    {
+  ];
+  const model = record.models.find((candidate) => candidate.id === record.selection.current.model);
+  if (model?.reasoning && record.selection.current.reasoningEffort) {
+    options.push({
       id: REASONING_EFFORT_CONFIG_ID,
       name: 'Reasoning effort',
       description: 'How much reasoning effort the model should use',
       category: 'thought_level',
       type: 'select',
       currentValue: record.selection.current.reasoningEffort,
-      options: DEEPSEEK_HARNESS_REASONING_OPTIONS.map((effort) => ({
-        value: effort.value,
+      options: model.reasoning.efforts.map((effort) => ({
+        value: effort.id,
         name: effort.name,
         description: effort.description ?? null,
       })),
-    },
-  ];
+    });
+  }
+  return options;
+}
+
+function legacyModels(record: SessionRecord): NewSessionResponseWithModels['models'] {
+  return {
+    currentModelId: record.selection.current.model,
+    availableModels: record.models.flatMap((model) => [
+      {
+        modelId: model.id,
+        name: model.name,
+        description: model.description ?? null,
+      },
+      ...(model.reasoning?.efforts.map((effort) => ({
+        modelId: `${model.id}[${effort.id}]`,
+        name: `${model.name} (${effort.name})`,
+        description: model.description ?? null,
+      })) ?? []),
+    ]),
+  };
 }
 
 function modeState(record: SessionRecord): SessionModeState {
   return {
     currentModeId: record.permissionMode,
-    availableModes: DEEPSEEK_HARNESS_PERMISSION_MODES.map((mode) => ({
-      id: mode.id,
+    availableModes: record.permissionOptions.map((mode) => ({
+      id: mode.value,
       name: mode.name,
       description: mode.description ?? null,
     })),
   };
 }
 
-function modelSupportsImages(models: readonly HarnessCatalogModel[], modelId: string): boolean {
+function modelSupportsImages(models: readonly HarnessResolvedModel[], modelId: string): boolean {
   return models.some(
     (model) =>
       model.id === modelId &&
       (model.inputModalities as readonly string[] | undefined)?.includes('image')
   );
+}
+
+function supportsAcpImagePrompts(
+  attachments: HarnessAttachmentStore | undefined,
+  models: readonly HarnessResolvedModel[]
+): boolean {
+  return (
+    attachments !== undefined &&
+    attachments.imageLimits.mediaTypes.some((mediaType) =>
+      IMAGE_MEDIA_TYPES.includes(mediaType as HarnessImageMediaType)
+    ) &&
+    models.some((model) => modelSupportsImages(models, model.id))
+  );
+}
+
+function resolveReasoningEffort(
+  model: HarnessResolvedModel,
+  requested: string | undefined
+): string | undefined {
+  const reasoning = model.reasoning;
+  if (!reasoning) {
+    if (requested) {
+      throw invalidParams(
+        `model ${JSON.stringify(model.id)} does not support reasoning effort ${JSON.stringify(requested)}`
+      );
+    }
+    return undefined;
+  }
+  const effort = requested ?? reasoning.defaultEffort;
+  if (!effort) return undefined;
+  assertAllowed(
+    effort,
+    new Set(reasoning.efforts.map((candidate) => candidate.id)),
+    `reasoning effort for model ${model.id}`
+  );
+  return effort;
+}
+
+function permissionState(
+  ctx: HarnessContext,
+  currentMode: string
+): {
+  ids: Set<string>;
+  options: HarnessPermissionOption[];
+} {
+  const ids = new Set(ctx.permissionPresets.names);
+  const options = ctx.permissionPresets.names.map((mode) => ctx.permissionPresets.optionOf(mode));
+  if (!ids.has(currentMode)) options.push(ctx.permissionPresets.optionOf(currentMode));
+  return { ids, options };
 }
 
 function imageMediaType(value: string): HarnessImageMediaType | undefined {
@@ -647,9 +776,11 @@ function isImageAdmissionError(error: unknown): error is Error & { code: string 
 
 async function admitAcpPrompt(
   prompt: PromptRequest['prompt'],
-  models: readonly HarnessCatalogModel[],
-  modelId: string,
-  attachments: HarnessAttachmentStore | undefined
+  llm: HarnessLlmCatalog,
+  selection: ModelSelection,
+  attachments: HarnessAttachmentStore | undefined,
+  imagePromptEnabled: boolean,
+  signal: AbortSignal
 ): Promise<Array<HarnessTextBlock | HarnessImageBlock>> {
   const images: Array<{ data: Uint8Array; mediaType: HarnessImageMediaType }> = [];
   for (const block of prompt) {
@@ -658,8 +789,8 @@ async function admitAcpPrompt(
       case 'resource_link':
         break;
       case 'image':
-        if (!modelSupportsImages(models, modelId)) {
-          throw invalidParams(`model ${JSON.stringify(modelId)} does not support image input`);
+        if (!imagePromptEnabled) {
+          throw invalidParams('inline image prompts were not advertised by this connection');
         }
         images.push(decodePromptImage(block));
         break;
@@ -675,12 +806,24 @@ async function admitAcpPrompt(
   let refs: readonly HarnessImageAttachmentRef[] = [];
   if (images.length > 0) {
     if (!attachments) throw internalError('no Harness attachment store is mounted');
+    signal.throwIfAborted();
+    let model: HarnessResolvedModel;
+    try {
+      model = await resolveHarnessModel(llm, selection.provider, selection.model, signal);
+    } catch (error: unknown) {
+      throw internalError(`unable to verify the current image model: ${errorChain(error)}`);
+    }
+    if (!model.inputModalities?.includes('image')) {
+      throw invalidParams(`model ${JSON.stringify(selection.model)} does not support image input`);
+    }
+    signal.throwIfAborted();
     try {
       refs = await attachments.saveImages(images);
     } catch (error: unknown) {
       if (isImageAdmissionError(error)) throw invalidParams(error.message);
       throw internalError('unable to persist the prompt image batch');
     }
+    signal.throwIfAborted();
   }
 
   const content: Array<HarnessTextBlock | HarnessImageBlock> = [];
@@ -713,6 +856,31 @@ async function admitAcpPrompt(
     throw invalidParams('empty prompt');
   }
   return content;
+}
+
+async function assistantBlockToAcp(
+  block: HarnessMessageBlock,
+  attachments: HarnessAttachmentStore | undefined
+): Promise<ContentBlock | undefined> {
+  if (block.type === 'text' && 'text' in block) {
+    return block.text.length > 0 ? { type: 'text', text: block.text } : undefined;
+  }
+  if (block.type !== 'image' || !('attachment' in block)) return undefined;
+  if (!attachments)
+    throw new Error('cannot deliver assistant image: no attachment store is mounted');
+  let stored: Awaited<ReturnType<HarnessAttachmentStore['readImage']>>;
+  try {
+    stored = await attachments.readImage(block.attachment);
+  } catch (error: unknown) {
+    throw new Error('cannot deliver assistant image: the attachment is unavailable or corrupt', {
+      cause: error,
+    });
+  }
+  return {
+    type: 'image',
+    data: Buffer.from(stored.data).toString('base64'),
+    mimeType: stored.ref.mediaType,
+  };
 }
 
 function createUserMessage(
@@ -795,13 +963,10 @@ export function apply(ctx: HarnessContext, rawConfig?: DeepSeekAcpAdapterConfig)
   const activeMcpServerNames = new Set<string>();
   let closed = false;
   let conn: AgentSideConnection;
+  let imagePromptEnabled = false;
 
-  for (const mode of PERMISSION_MODE_IDS) {
-    if (!ctx.permissionPresets.names.includes(mode)) {
-      throw new Error(
-        `acp-extension-dsh: permission preset ${JSON.stringify(mode)} is not composed`
-      );
-    }
+  if (ctx.permissionPresets.names.length === 0) {
+    throw new Error('acp-extension-dsh: no permission presets are composed');
   }
 
   const assertOpen = (): void => {
@@ -819,20 +984,112 @@ export function apply(ctx: HarnessContext, rawConfig?: DeepSeekAcpAdapterConfig)
     return record?.agent === agent ? record : undefined;
   };
 
-  const notify = (notification: SessionNotification): void => {
-    void conn.sessionUpdate(notification).catch((error: unknown) => {
+  const notify = async (notification: SessionNotification): Promise<void> => {
+    await conn.sessionUpdate(notification).catch((error: unknown) => {
       ctx.logger.warn(`acp-extension-dsh: session/update failed: ${String(error)}`);
     });
   };
 
-  const settlePrompt = (record: SessionRecord, reason: StopReason): void => {
-    const inflight = record.inflight;
-    if (!inflight) return;
-    record.inflight = undefined;
-    inflight.resolve(reason);
+  const enqueueOutput = (
+    record: SessionRecord,
+    work: () => Promise<void>,
+    inflight?: InflightPrompt
+  ): void => {
+    record.outputTail = record.outputTail.then(work).catch((error: unknown) => {
+      const failure = error instanceof Error ? error : new Error(String(error));
+      if (inflight) inflight.outputError ??= failure;
+      ctx.logger.warn(`acp-extension-dsh: assistant output failed: ${errorChain(error)}`);
+    });
+  };
+
+  const enqueueNotification = (
+    record: SessionRecord,
+    notification: SessionNotification,
+    inflight?: InflightPrompt
+  ): void => enqueueOutput(record, () => notify(notification), inflight);
+
+  const settleAfterQuiescence = (record: SessionRecord, inflight: InflightPrompt): void => {
+    if (inflight.settlementStarted) return;
+    inflight.settlementStarted = true;
+    void (async () => {
+      await inflight.admissionDone;
+      if (inflight.messageQueued) {
+        await record.agent.whenIdle();
+        await record.outputTail;
+      }
+      if (record.inflight !== inflight) return;
+      record.inflight = undefined;
+      if (inflight.cancelRequested) {
+        inflight.resolve('cancelled');
+      } else if (inflight.outputError) {
+        inflight.reject(
+          internalError(`assistant output delivery failed: ${inflight.outputError.message}`)
+        );
+      } else if (inflight.agentError) {
+        inflight.reject(internalError(`turn failed: ${inflight.agentError.message}`));
+      } else if (inflight.endReason?.kind === 'error') {
+        inflight.reject(internalError(`turn failed: ${inflight.endReason.error.message}`));
+      } else {
+        const end = inflight.endReason;
+        inflight.resolve(
+          end ? (end.kind === 'max-tokens' ? 'end_turn' : turnEndToStopReason(end)) : 'cancelled'
+        );
+      }
+    })().catch((error: unknown) => {
+      if (record.inflight !== inflight) return;
+      record.inflight = undefined;
+      inflight.reject(internalError(`prompt settlement failed: ${errorChain(error)}`));
+    });
+  };
+
+  const refreshPermissionState = (record: SessionRecord): boolean => {
+    const permissionMode = ctx.permissionPresets.current(record.agent.session.events);
+    if (permissionMode === record.permissionMode) return false;
+    const state = permissionState(ctx, permissionMode);
+    record.permissionMode = permissionMode;
+    record.permissionModeIds = state.ids;
+    record.permissionOptions = state.options;
+    return true;
+  };
+
+  const schedulePermissionSync = (record: SessionRecord): void => {
+    if (record.permissionSyncQueued) return;
+    record.permissionSyncQueued = true;
+    queueMicrotask(() => {
+      record.permissionSyncQueued = false;
+      if (sessions.get(record.agent.session.id) !== record) return;
+      try {
+        if (!refreshPermissionState(record)) return;
+        enqueueNotification(record, {
+          sessionId: record.agent.session.id,
+          update: {
+            sessionUpdate: 'current_mode_update',
+            currentModeId: record.permissionMode,
+          },
+        });
+        enqueueNotification(record, {
+          sessionId: record.agent.session.id,
+          update: {
+            sessionUpdate: 'config_option_update',
+            configOptions: configOptions(record),
+          },
+        });
+      } catch (error: unknown) {
+        ctx.logger.warn(
+          `acp-extension-dsh: failed to synchronize permission state: ${errorChain(error)}`
+        );
+      }
+    });
   };
 
   const disposeRecords = async (records: readonly SessionRecord[]): Promise<void> => {
+    await Promise.all(
+      records.map(async (record) => {
+        await record.inflight?.admissionDone;
+        await record.agent.whenIdle();
+        await record.outputTail;
+      })
+    );
     const subagents = ctx.get('subagents') as ContinuableDrain | undefined;
     if (subagents) {
       try {
@@ -860,6 +1117,7 @@ export function apply(ctx: HarnessContext, rawConfig?: DeepSeekAcpAdapterConfig)
   ctx.on('session/event', (session: HarnessSession, event: HarnessSessionEvent) => {
     const record = sessions.get(session.header.id);
     if (!record || record.agent.session !== session) return;
+    if (PERMISSION_EVENT_TYPES.has(event.type)) schedulePermissionSync(record);
     try {
       if (
         event.type === 'assistant/chunk' &&
@@ -867,7 +1125,7 @@ export function apply(ctx: HarnessContext, rawConfig?: DeepSeekAcpAdapterConfig)
         typeof event.data.chunk.text === 'string' &&
         event.data.chunk.text.length > 0
       ) {
-        notify({
+        enqueueNotification(record, {
           sessionId: record.agent.session.id,
           update: {
             sessionUpdate: 'agent_thought_chunk',
@@ -879,7 +1137,7 @@ export function apply(ctx: HarnessContext, rawConfig?: DeepSeekAcpAdapterConfig)
         event.data.chunk?.type === 'block-end' &&
         event.data.chunk.block?.type === 'reasoning'
       ) {
-        notify({
+        enqueueNotification(record, {
           sessionId: record.agent.session.id,
           update: {
             sessionUpdate: 'agent_thought_chunk',
@@ -887,35 +1145,29 @@ export function apply(ctx: HarnessContext, rawConfig?: DeepSeekAcpAdapterConfig)
           },
         });
       } else if (event.type === 'assistant/message') {
-        for (const block of event.data.message?.content ?? []) {
-          if (block.type === 'text' && 'text' in block && block.text.length > 0) {
-            notify({
-              sessionId: record.agent.session.id,
-              update: {
-                sessionUpdate: 'agent_message_chunk',
-                content: { type: 'text', text: block.text },
-              },
-            });
-          } else if (block.type === 'image' && 'attachment' in block) {
-            notify({
-              sessionId: record.agent.session.id,
-              update: {
-                sessionUpdate: 'agent_message_chunk',
-                content: {
-                  type: 'text',
-                  text: `[image attachment ${block.attachment.attachmentId}]`,
-                },
-              },
-            });
-          }
-        }
+        const inflight = record.inflight?.turn === event.data.turn ? record.inflight : undefined;
+        const attachments = ctx.get('attachments') as HarnessAttachmentStore | undefined;
+        enqueueOutput(
+          record,
+          async () => {
+            for (const block of event.data.message?.content ?? []) {
+              const content = await assistantBlockToAcp(block, attachments);
+              if (!content) continue;
+              await notify({
+                sessionId: record.agent.session.id,
+                update: { sessionUpdate: 'agent_message_chunk', content },
+              });
+            }
+          },
+          inflight
+        );
       } else if (event.type === 'compaction/start' && event.data.compactionId) {
         const activity = {
           version: 1,
           kind: 'context_compaction',
           automatic: event.data.turn !== null,
         } as const satisfies LodyActivityMeta;
-        notify({
+        enqueueNotification(record, {
           sessionId: record.agent.session.id,
           update: {
             sessionUpdate: 'tool_call',
@@ -933,7 +1185,7 @@ export function apply(ctx: HarnessContext, rawConfig?: DeepSeekAcpAdapterConfig)
           automatic: event.data.turn !== null,
           ...(event.data.error ? { failureReason: event.data.error } : {}),
         } as const satisfies LodyActivityMeta;
-        notify({
+        enqueueNotification(record, {
           sessionId: record.agent.session.id,
           update: {
             sessionUpdate: 'tool_call_update',
@@ -952,12 +1204,7 @@ export function apply(ctx: HarnessContext, rawConfig?: DeepSeekAcpAdapterConfig)
         inflight.turn === event.data.turn &&
         event.data.reason
       ) {
-        if (event.data.reason.kind === 'error') {
-          record.inflight = undefined;
-          inflight.reject(internalError(`turn failed: ${event.data.reason.error.message}`));
-        } else {
-          inflight.endReason = event.data.reason;
-        }
+        inflight.endReason = event.data.reason;
       }
     }
   });
@@ -975,9 +1222,9 @@ export function apply(ctx: HarnessContext, rawConfig?: DeepSeekAcpAdapterConfig)
     ({ agent, turn, error }: { agent: HarnessAgent; turn: number; error: unknown }) => {
       const record = ownedRecord(agent);
       const inflight = record?.inflight;
-      if (!record || !inflight || (inflight.turn !== undefined && inflight.turn !== turn)) return;
-      record.inflight = undefined;
-      inflight.reject(internalError(`turn failed: ${errorChain(error)}`));
+      if (!record || !inflight || !inflight.messageQueued || inflight.turn !== turn) return;
+      inflight.agentError = new Error(errorChain(error));
+      settleAfterQuiescence(record, inflight);
     }
   );
 
@@ -1006,9 +1253,19 @@ export function apply(ctx: HarnessContext, rawConfig?: DeepSeekAcpAdapterConfig)
   );
 
   const setPermissionMode = (record: SessionRecord, modeId: string): void => {
-    assertAllowed(modeId, PERMISSION_MODE_IDS, 'permission mode');
+    if (modeId === record.permissionMode) return;
+    assertAllowed(modeId, record.permissionModeIds, 'permission mode');
     ctx.permissionPresets.set(record.agent.session, modeId);
-    record.permissionMode = modeId;
+    const permissionMode = ctx.permissionPresets.current(record.agent.session.events);
+    if (permissionMode !== modeId) {
+      throw internalError(
+        `permission preset ${JSON.stringify(modeId)} did not become the effective mode`
+      );
+    }
+    record.permissionMode = permissionMode;
+    const state = permissionState(ctx, permissionMode);
+    record.permissionModeIds = state.ids;
+    record.permissionOptions = state.options;
   };
 
   const setConfigOption = (
@@ -1039,13 +1296,47 @@ export function apply(ctx: HarnessContext, rawConfig?: DeepSeekAcpAdapterConfig)
           );
         });
     } else if (params.configId === MODEL_CONFIG_ID) {
-      assertAllowed(value, new Set(record.models.map((model) => model.id)), 'model');
-      record.selection.current = { ...record.selection.current, model: value };
+      const llm = ctx.get('llm') as HarnessLlmCatalog | undefined;
+      if (!llm) throw internalError('no Harness LLM catalog is mounted');
+      return resolveHarnessModel(llm, record.selection.current.provider, value)
+        .then((model) => {
+          const index = record.models.findIndex((candidate) => candidate.id === value);
+          if (index === -1) record.models.push(model);
+          else record.models[index] = model;
+          const reasoningEffort = resolveReasoningEffort(
+            model,
+            record.selection.current.reasoningEffort &&
+              model.reasoning?.efforts.some(
+                (effort) => effort.id === record.selection.current.reasoningEffort
+              )
+              ? record.selection.current.reasoningEffort
+              : undefined
+          );
+          record.selection.current = {
+            provider: record.selection.current.provider,
+            model: value,
+            ...(reasoningEffort ? { reasoningEffort } : {}),
+          };
+          return { configOptions: configOptions(record) };
+        })
+        .catch((error: unknown) => {
+          if (error instanceof RequestError) throw error;
+          throw invalidParams(
+            `failed to resolve model ${JSON.stringify(value)}: ${errorChain(error)}`
+          );
+        });
     } else if (params.configId === REASONING_EFFORT_CONFIG_ID) {
-      assertAllowed(value, REASONING_EFFORT_IDS, 'reasoning effort');
+      const model = record.models.find(
+        (candidate) => candidate.id === record.selection.current.model
+      );
+      if (!model) throw internalError('selected model metadata is unavailable');
+      const reasoningEffort = resolveReasoningEffort(model, value);
+      if (!reasoningEffort) {
+        throw invalidParams(`model ${JSON.stringify(model.id)} has no reasoning selector`);
+      }
       record.selection.current = {
         ...record.selection.current,
-        reasoningEffort: value as ReasoningEffort,
+        reasoningEffort,
       };
     } else {
       throw invalidParams(`unknown config option: ${params.configId}`);
@@ -1057,13 +1348,17 @@ export function apply(ctx: HarnessContext, rawConfig?: DeepSeekAcpAdapterConfig)
     conn = connection;
     return {
       async initialize(_params: InitializeRequest): Promise<InitializeResponse> {
-        const models = await loadHarnessModels(ctx, config.provider);
+        const models = await loadHarnessModels(ctx, config.provider, config.model);
+        imagePromptEnabled = supportsAcpImagePrompts(
+          ctx.get('attachments') as HarnessAttachmentStore | undefined,
+          models
+        );
         return {
           protocolVersion: PROTOCOL_VERSION,
           agentInfo: { name: 'acp-extension-dsh', version: ACP_EXTENSION_DSH_VERSION },
           agentCapabilities: {
             promptCapabilities: {
-              image: models.some((model) => modelSupportsImages(models, model.id)),
+              image: imagePromptEnabled,
               audio: false,
               embeddedContext: false,
             },
@@ -1082,18 +1377,21 @@ export function apply(ctx: HarnessContext, rawConfig?: DeepSeekAcpAdapterConfig)
       async newSession(params: NewSessionRequest): Promise<NewSessionResponseWithModels> {
         assertOpen();
         validateSessionParams(params);
-        let models: HarnessCatalogModel[];
+        let models: HarnessResolvedModel[];
         try {
-          models = await loadHarnessModels(ctx, config.provider);
+          models = await loadHarnessModels(ctx, config.provider, config.model);
         } catch (error: unknown) {
           throw internalError(`failed to list models: ${errorChain(error)}`);
         }
         const sessionId = randomUUID();
+        const initialModel = models.find((model) => model.id === config.model);
+        if (!initialModel) throw internalError('configured model metadata is unavailable');
+        const reasoningEffort = resolveReasoningEffort(initialModel, config.reasoningEffort);
         const selection: ModelSelectionRef = {
           current: {
             provider: config.provider,
             model: config.model,
-            reasoningEffort: config.reasoningEffort,
+            ...(reasoningEffort ? { reasoningEffort } : {}),
           },
         };
         const agentPresetOptions = (await ctx.agentPresets.list()).filter(
@@ -1145,9 +1443,13 @@ export function apply(ctx: HarnessContext, rawConfig?: DeepSeekAcpAdapterConfig)
           throw internalError('connection closed during session/new');
         }
         let permissionMode: string;
+        let permissionModeIds: Set<string>;
+        let permissionOptions: HarnessPermissionOption[];
         try {
           permissionMode = ctx.permissionPresets.current(handle.agent.session.events);
-          assertAllowed(permissionMode, PERMISSION_MODE_IDS, 'permission mode');
+          const state = permissionState(ctx, permissionMode);
+          permissionModeIds = state.ids;
+          permissionOptions = state.options;
         } catch (error: unknown) {
           await dispose();
           throw error;
@@ -1157,24 +1459,20 @@ export function apply(ctx: HarnessContext, rawConfig?: DeepSeekAcpAdapterConfig)
           dispose,
           selection,
           permissionMode,
+          permissionModeIds,
+          permissionOptions,
           agentPreset: mountedPreset,
           agentPresetOptions,
           models,
           started: false,
+          outputTail: Promise.resolve(),
         };
         sessions.set(sessionId, record);
         return {
           sessionId,
           modes: modeState(record),
           configOptions: configOptions(record),
-          models: {
-            currentModelId: record.selection.current.model,
-            availableModels: record.models.map((model) => ({
-              modelId: model.id,
-              name: model.name ?? model.id,
-              description: model.description ?? null,
-            })),
-          },
+          models: legacyModels(record),
         };
       },
 
@@ -1197,70 +1495,104 @@ export function apply(ctx: HarnessContext, rawConfig?: DeepSeekAcpAdapterConfig)
           throw internalError('prompt was not queued: the agent was disposed outside the bridge');
         }
         const attachments = ctx.get('attachments') as HarnessAttachmentStore | undefined;
+        const llm = ctx.get('llm') as HarnessLlmCatalog | undefined;
+        if (!llm) throw internalError('no Harness LLM catalog is mounted');
         const messageId = randomUUID();
         let resolvePrompt!: (reason: StopReason) => void;
         let rejectPrompt!: (error: Error) => void;
+        let finishAdmission!: () => void;
         const completion = new Promise<StopReason>((resolve, reject) => {
           resolvePrompt = resolve;
           rejectPrompt = reject;
         });
+        const admissionDone = new Promise<void>((resolve) => {
+          finishAdmission = resolve;
+        });
+        const admissionController = new AbortController();
         const inflight: InflightPrompt = {
           resolve: resolvePrompt,
           reject: rejectPrompt,
-          messageId,
+          messageQueued: false,
+          admissionDone,
+          finishAdmission,
+          admissionController,
+          cancelRequested: false,
+          settlementStarted: false,
         };
         record.inflight = inflight;
+        let admissionError: unknown;
         try {
           const content = await admitAcpPrompt(
             params.prompt,
-            record.models,
-            record.selection.current.model,
-            attachments
+            llm,
+            record.selection.current,
+            attachments,
+            imagePromptEnabled,
+            admissionController.signal
           );
-          if (record.inflight !== inflight) return { stopReason: await completion };
-          const message = createUserMessage(messageId, content);
-          record.started = true;
-          try {
-            record.agent.followup(message);
-          } catch (error: unknown) {
-            record.inflight = undefined;
-            record.started = false;
-            throw internalError(
-              `prompt was not queued: ${error instanceof Error ? error.message : String(error)}`
-            );
+          if (!inflight.cancelRequested) {
+            if (ctx.agents.get(record.agent.id) !== record.agent) {
+              throw internalError(
+                'prompt was not queued: the agent was disposed outside the bridge'
+              );
+            }
+            const message = createUserMessage(messageId, content);
+            inflight.messageId = messageId;
+            inflight.messageQueued = true;
+            const wasStarted = record.started;
+            try {
+              record.agent.followup(message);
+              record.started = true;
+            } catch (error: unknown) {
+              inflight.messageQueued = false;
+              record.started = wasStarted;
+              throw new Error(
+                `prompt was not queued: ${error instanceof Error ? error.message : String(error)}`,
+                { cause: error }
+              );
+            }
           }
-          void record.agent.whenIdle().then(() => {
-            if (record.inflight !== inflight) return;
-            record.inflight = undefined;
-            const end = inflight.endReason;
-            inflight.resolve(
-              end
-                ? end.kind === 'max-tokens'
-                  ? 'end_turn'
-                  : turnEndToStopReason(end)
-                : 'cancelled'
-            );
-          });
         } catch (error: unknown) {
-          if (record.inflight === inflight) record.inflight = undefined;
-          throw error;
+          admissionError = error;
+        } finally {
+          inflight.finishAdmission();
         }
+        if (inflight.cancelRequested) {
+          settleAfterQuiescence(record, inflight);
+          return { stopReason: await completion };
+        }
+        if (admissionError) {
+          if (record.inflight === inflight) record.inflight = undefined;
+          if (admissionError instanceof RequestError) throw admissionError;
+          throw internalError(errorChain(admissionError));
+        }
+        settleAfterQuiescence(record, inflight);
         return { stopReason: await completion };
       },
 
       cancel(params: CancelNotification): Promise<void> {
         const record = sessions.get(params.sessionId);
         if (!record) return Promise.resolve();
-        record.agent.cancel({ kind: 'user' });
-        settlePrompt(record, 'cancelled');
+        const inflight = record.inflight;
+        if (inflight) {
+          inflight.cancelRequested = true;
+          inflight.admissionController.abort(new Error('ACP prompt cancelled'));
+          settleAfterQuiescence(record, inflight);
+        }
+        if (!inflight || inflight.messageQueued) record.agent.cancel({ kind: 'user' });
         return Promise.resolve();
       },
 
       async closeSession(params: CloseSessionRequest): Promise<void> {
         const record = requireSession(params.sessionId);
         sessions.delete(params.sessionId);
-        record.agent.cancel({ kind: 'user' });
-        settlePrompt(record, 'cancelled');
+        const inflight = record.inflight;
+        if (inflight) {
+          inflight.cancelRequested = true;
+          inflight.admissionController.abort(new Error('ACP session closed'));
+          settleAfterQuiescence(record, inflight);
+        }
+        if (!inflight || inflight.messageQueued) record.agent.cancel({ kind: 'user' });
         await disposeRecords([record]);
       },
     };
@@ -1281,8 +1613,13 @@ export function apply(ctx: HarnessContext, rawConfig?: DeepSeekAcpAdapterConfig)
     const records = [...sessions.values()];
     sessions.clear();
     for (const record of records) {
-      record.agent.cancel({ kind: 'user' });
-      settlePrompt(record, 'cancelled');
+      const inflight = record.inflight;
+      if (inflight) {
+        inflight.cancelRequested = true;
+        inflight.admissionController.abort(new Error('ACP bridge disposed'));
+        settleAfterQuiescence(record, inflight);
+      }
+      if (!inflight || inflight.messageQueued) record.agent.cancel({ kind: 'user' });
     }
     quiescing = (async () => {
       await disposeRecords(records);
