@@ -8,13 +8,34 @@ import {
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { apply } from './adapter.js';
-import { DEEPSEEK_HARNESS_AGENT_PRESETS, DEEPSEEK_HARNESS_MODELS } from './capabilities.js';
+import { DEEPSEEK_HARNESS_AGENT_PRESETS } from './capabilities.js';
 
 type Listener = (...args: unknown[]) => unknown;
 
+const DEFAULT_MODELS = [
+  {
+    modelId: 'deepseek-v4-flash',
+    name: 'DeepSeek-V4-Flash',
+    description: 'Faster DeepSeek Harness coding model.',
+    inputModalities: ['text'],
+  },
+  {
+    modelId: 'deepseek-v4-pro',
+    name: 'DeepSeek-V4-Pro',
+    description: 'More capable DeepSeek Harness coding model.',
+    inputModalities: ['text'],
+  },
+  {
+    modelId: 'deepseek-v4-flash-vision-exp',
+    name: 'DeepSeek-V4-Flash-Vision-Exp',
+    description: 'Experimental multimodal DeepSeek model with image understanding.',
+    inputModalities: ['text', 'image'],
+  },
+] as const;
+
 const DEFAULT_LLM_CATALOG = {
   listModels: async (provider: string) =>
-    DEEPSEEK_HARNESS_MODELS.map((model) => ({
+    DEFAULT_MODELS.map((model) => ({
       provider,
       id: model.modelId,
       name: model.name,
@@ -22,7 +43,7 @@ const DEFAULT_LLM_CATALOG = {
       inputModalities: model.inputModalities,
     })),
   resolveModelInfo: async (provider: string, modelId: string) => {
-    const catalogModel = DEEPSEEK_HARNESS_MODELS.find((model) => model.modelId === modelId);
+    const catalogModel = DEFAULT_MODELS.find((model) => model.modelId === modelId);
     return {
       provider,
       id: modelId,
@@ -112,9 +133,28 @@ describe('DeepSeek Harness ACP adapter', () => {
 
   afterEach(async () => {
     await Promise.all(disposers.splice(0).map((dispose) => dispose()));
+    vi.unstubAllEnvs();
+    vi.unstubAllGlobals();
   });
 
   it('applies model, reasoning-effort, and permission selections to Harness state', async () => {
+    vi.stubEnv('DEEPSEEK_BASE_URL', 'https://gateway.example/open/v1/');
+    vi.stubEnv('DEEPSEEK_API_KEY', 'sk-test');
+    const fetchModels = vi.fn(
+      async (_input: RequestInfo | URL, _init?: RequestInit) =>
+        new Response(
+          JSON.stringify({
+            object: 'list',
+            data: [
+              { id: 'gateway-default', object: 'model', owned_by: 'gateway' },
+              { id: 'deepseek-v4-flash', object: 'model', owned_by: 'gateway' },
+              { id: 'gateway-default', object: 'model', owned_by: 'gateway' },
+            ],
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } }
+        )
+    );
+    vi.stubGlobal('fetch', fetchModels);
     const streams = connectedStreams();
     const scopedListeners = new Map<string, Listener>();
     const harnessListeners = new Map<string, Listener>();
@@ -230,7 +270,7 @@ describe('DeepSeek Harness ACP adapter', () => {
     const created = await client.newSession({ cwd: process.cwd(), mcpServers: [] });
     expect(created.modes?.currentModeId).toBe('workspace-write');
     expect(selectValue(created.configOptions, 'agent_preset')).toBe('standard');
-    expect(selectValue(created.configOptions, 'model')).toBe('deepseek-v4-pro');
+    expect(selectValue(created.configOptions, 'model')).toBe('gateway-default');
     expect(selectValue(created.configOptions, 'reasoning_effort')).toBe('max');
     expect(selectOption(created.configOptions, 'agent_preset')).toMatchObject({
       options: [
@@ -242,6 +282,24 @@ describe('DeepSeek Harness ACP adapter', () => {
         { value: 'custom', name: 'Custom preset', description: 'User-provided preset' },
       ],
     });
+    expect(selectOption(created.configOptions, 'model')).toMatchObject({
+      options: [
+        expect.objectContaining({ value: 'gateway-default' }),
+        expect.objectContaining({ value: 'deepseek-v4-flash' }),
+      ],
+    });
+    expect(fetchModels).toHaveBeenCalledOnce();
+    expect(fetchModels).toHaveBeenCalledWith(
+      new URL('https://gateway.example/open/v1/models'),
+      expect.objectContaining({
+        method: 'GET',
+        redirect: 'error',
+        headers: expect.any(Headers),
+      })
+    );
+    const requestHeaders = fetchModels.mock.calls[0]![1]?.headers;
+    expect(requestHeaders).toBeInstanceOf(Headers);
+    expect((requestHeaders as Headers).get('authorization')).toBe('Bearer sk-test');
 
     const modelResponse = await client.setSessionConfigOption({
       sessionId: created.sessionId,

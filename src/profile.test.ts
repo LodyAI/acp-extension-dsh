@@ -48,19 +48,15 @@ describe('DeepSeek Harness profile', () => {
     expect(config).toContain('openAt: never');
     expect(config).toContain("name: '@deepseek-ai/dsh-code-runtime-worker-thread'");
     expect(config).toContain("name: '@deepseek-ai/dsh-attachment-local'");
-    expect(config).toContain(
-      'models: !!js "process.env.ACP_EXTENSION_DSH_MODELS ? JSON.parse(process.env.ACP_EXTENSION_DSH_MODELS).map((id) => ({ id })) : undefined"'
-    );
-    expect(config).toContain(
-      'model: !!js "process.env.ACP_EXTENSION_DSH_MODELS ? JSON.parse(process.env.ACP_EXTENSION_DSH_MODELS)[0] : \'deepseek-v4-pro\'"'
-    );
+    expect(config).not.toContain('ACP_EXTENSION_DSH_MODELS');
+    expect(config).toContain('model: deepseek-v4-pro');
     expect(config).toContain('name: "/opt/acp-extension-dsh.js"');
     expect(config).toContain('compression: zstd');
     expect(config).not.toMatch(/api[_-]?key:\s+[^D\n]/iu);
   });
 
   it('invalidates cached probes when the generated profile contract changes', () => {
-    expect(ACP_EXTENSION_DSH_PROFILE_REVISION).toBe('v7');
+    expect(ACP_EXTENSION_DSH_PROFILE_REVISION).toBe('v8');
   });
 
   it('defaults to upstream-compatible zstd and permits a detected legacy raw root', () => {

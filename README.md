@@ -25,12 +25,13 @@ image admission, and the legacy response carries `model[effort]` entries so a
 host can cache the reasoning choices for every model rather than only the model
 that happened to be active during the probe. Permission choices use the composed
 Harness preset table.
-The model catalog remains advisory: an explicitly configured or selected gateway
-model is resolved and exposed even when it is not listed. The generated profile
-does not pin a default catalog, so runtime model metadata flows through from
-`dsh-llm-deepseek`. A host can set `ACP_EXTENSION_DSH_MODELS` to a JSON string
-array of model ids to replace that advisory catalog for a custom endpoint; the
-first id becomes the initial ACP model.
+When `DEEPSEEK_BASE_URL` is set, the adapter requests its OpenAI-compatible
+`GET /models` endpoint once per ACP connection, resolves every advertised id
+through Harness, and selects the first result initially. Discovery is bounded,
+does not follow redirects, and reports an actionable startup failure when the
+endpoint cannot provide a usable list. Without an endpoint, the Harness catalog
+remains advisory: an explicitly configured or selected model is still resolved
+even when it is not listed.
 
 ## Exports
 

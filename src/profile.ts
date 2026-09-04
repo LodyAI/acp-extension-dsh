@@ -1,8 +1,6 @@
-import { ACP_EXTENSION_DSH_MODELS_ENV } from './capabilities.js';
-
 export const ACP_EXTENSION_DSH_VERSION = '0.1.1';
 export const DEEPSEEK_HARNESS_VERSION = '0.1.1-rc.2';
-export const ACP_EXTENSION_DSH_PROFILE_REVISION = 'v7';
+export const ACP_EXTENSION_DSH_PROFILE_REVISION = 'v8';
 export const ACP_EXTENSION_DSH_SESSION_ROOT_ENV = 'ACP_EXTENSION_DSH_SESSION_ROOT';
 export const ACP_EXTENSION_DSH_QUERY_PATH_ENV = 'ACP_EXTENSION_DSH_QUERY_PATH';
 export const DEEPSEEK_HARNESS_DEFAULT_SESSION_COMPRESSION = 'zstd';
@@ -176,7 +174,6 @@ export function createDeepSeekHarnessCordisConfig(
   config:
     thinking: enabled
     reasoningEffort: max
-    models: !!js "process.env.${ACP_EXTENSION_DSH_MODELS_ENV} ? JSON.parse(process.env.${ACP_EXTENSION_DSH_MODELS_ENV}).map((id) => ({ id })) : undefined"
 
 - id: sandbox
   name: '@deepseek-ai/dsh-sandbox-local'
@@ -305,7 +302,7 @@ export function createDeepSeekHarnessCordisConfig(
   name: ${JSON.stringify(adapterPath)}
   config:
     provider: deepseek-official
-    model: !!js "process.env.${ACP_EXTENSION_DSH_MODELS_ENV} ? JSON.parse(process.env.${ACP_EXTENSION_DSH_MODELS_ENV})[0] : 'deepseek-v4-pro'"
+    model: deepseek-v4-pro
     reasoningEffort: max
 `;
 }
