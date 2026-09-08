@@ -70,3 +70,7 @@ npm run format:check
 ```
 
 Node.js 22 or newer is required.
+
+## Plan configuration
+
+Core’s boolean `plan_mode` option is available only when the current Agent preset mounts the native Plan service. It calls `planMode.set`, preserves sandbox/approval settings, and publishes durable Plan changes as config updates. A pending selection is reflected until its next-step commit; Plan is guidance, not a sandbox policy.

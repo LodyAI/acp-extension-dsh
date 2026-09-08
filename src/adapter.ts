@@ -1,3 +1,4 @@
+import { LODY_PLAN_MODE_CONFIG_ID, createPlanModeConfigOption } from 'acp-extension-core';
 /**
  * ACP surface for DeepSeek Harness.
  *
@@ -191,7 +192,13 @@ type HarnessPermissionOption = {
   description?: string;
 };
 
+type HarnessPlanMode = {
+  get(agent: HarnessAgent): { active: boolean; pending?: boolean };
+  set(agent: HarnessAgent, active: boolean): 'committed' | 'queued' | 'cancelled' | 'noop';
+};
+
 type HarnessAgentContext = {
+  get(name: string): unknown;
   on<TArgs extends unknown[]>(event: string, listener: (...args: TArgs) => unknown): () => void;
   plugin(plugin: HarnessPlugin, config: HarnessMcpClientConfig): HarnessPluginHandle;
   loader: {
@@ -665,6 +672,10 @@ function installModelSelection(
   );
 }
 
+function planModeService(record: SessionRecord): HarnessPlanMode | undefined {
+  return record.agent.ctx.get('planMode') as HarnessPlanMode | undefined;
+}
+
 function configOptions(record: SessionRecord): SessionConfigOption[] {
   const options: SessionConfigOption[] = [
     {
@@ -714,6 +725,11 @@ function configOptions(record: SessionRecord): SessionConfigOption[] {
       })),
     },
   ];
+  const plan = planModeService(record);
+  if (plan) {
+    const state = plan.get(record.agent);
+    options.push(createPlanModeConfigOption(state.pending ?? state.active));
+  }
   const model = record.models.find((candidate) => candidate.id === record.selection.current.model);
   if (model?.reasoning && record.selection.current.reasoningEffort) {
     options.push({
@@ -1176,6 +1192,12 @@ export function apply(ctx: HarnessContext, rawConfig?: DeepSeekAcpAdapterConfig)
   ctx.on('session/event', (session: HarnessSession, event: HarnessSessionEvent) => {
     const record = sessions.get(session.header.id);
     if (!record || record.agent.session !== session) return;
+    if (event.type === 'plan/mode') {
+      enqueueNotification(record, {
+        sessionId: record.agent.session.id,
+        update: { sessionUpdate: 'config_option_update', configOptions: configOptions(record) },
+      });
+    }
     if (PERMISSION_EVENT_TYPES.has(event.type)) schedulePermissionSync(record);
     try {
       if (
@@ -1328,6 +1350,14 @@ export function apply(ctx: HarnessContext, rawConfig?: DeepSeekAcpAdapterConfig)
     record: SessionRecord,
     params: SetSessionConfigOptionRequest
   ): SetSessionConfigOptionResponse | Promise<SetSessionConfigOptionResponse> => {
+    if (params.configId === LODY_PLAN_MODE_CONFIG_ID) {
+      const plan = planModeService(record);
+      if (!plan || typeof params.value !== 'boolean') {
+        throw invalidParams('Plan mode requires a supported Agent preset and a boolean value');
+      }
+      plan.set(record.agent, params.value);
+      return { configOptions: configOptions(record) };
+    }
     const value = requireSelectValue(params);
     if (params.configId === MODE_CONFIG_ID) {
       setPermissionMode(record, value);

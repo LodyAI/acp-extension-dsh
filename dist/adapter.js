@@ -1,3 +1,4 @@
+import { LODY_PLAN_MODE_CONFIG_ID, createPlanModeConfigOption } from 'acp-extension-core';
 /**
  * ACP surface for DeepSeek Harness.
  *
@@ -312,6 +313,9 @@ function installModelSelection(agentContext, selection) {
         };
     });
 }
+function planModeService(record) {
+    return record.agent.ctx.get('planMode');
+}
 function configOptions(record) {
     const options = [
         {
@@ -359,6 +363,11 @@ function configOptions(record) {
             })),
         },
     ];
+    const plan = planModeService(record);
+    if (plan) {
+        const state = plan.get(record.agent);
+        options.push(createPlanModeConfigOption(state.pending ?? state.active));
+    }
     const model = record.models.find((candidate) => candidate.id === record.selection.current.model);
     if (model?.reasoning && record.selection.current.reasoningEffort) {
         options.push({
@@ -757,6 +766,12 @@ export function apply(ctx, rawConfig) {
         const record = sessions.get(session.header.id);
         if (!record || record.agent.session !== session)
             return;
+        if (event.type === 'plan/mode') {
+            enqueueNotification(record, {
+                sessionId: record.agent.session.id,
+                update: { sessionUpdate: 'config_option_update', configOptions: configOptions(record) },
+            });
+        }
         if (PERMISSION_EVENT_TYPES.has(event.type))
             schedulePermissionSync(record);
         try {
@@ -889,6 +904,14 @@ export function apply(ctx, rawConfig) {
         record.permissionOptions = permissionState(ctx, permissionMode);
     };
     const setConfigOption = (record, params) => {
+        if (params.configId === LODY_PLAN_MODE_CONFIG_ID) {
+            const plan = planModeService(record);
+            if (!plan || typeof params.value !== 'boolean') {
+                throw invalidParams('Plan mode requires a supported Agent preset and a boolean value');
+            }
+            plan.set(record.agent, params.value);
+            return { configOptions: configOptions(record) };
+        }
         const value = requireSelectValue(params);
         if (params.configId === MODE_CONFIG_ID) {
             setPermissionMode(record, value);
