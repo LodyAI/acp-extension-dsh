@@ -31,6 +31,11 @@ Harness. Keep it usable without importing Lody packages.
   of the official `standard`/`code`/`minimal`/`cordis` Agent presets; update it
   together with the package list and retain the upstream notice. It is excluded
   from Prettier so the vendored files remain byte-identical to upstream.
+  Mount `dsh-settings-file` in the host composition so settings resolve from
+  `$DSH_HOME/settings.yaml` (or `~/.dsh/settings.yaml`). Keep its package in the
+  exact-version closure; the abstract `dsh-settings` dependency alone reads no file.
+  The ACP entry must require `settings` so its first capability request cannot
+  cache a default catalog before the user document has loaded.
   Its persistence default matches upstream `zstd`; hosts may select legacy raw
   `none` only after inspecting an existing single-encoding root. A mixed root is
   an error and must never trigger automatic artifact mutation or deletion.

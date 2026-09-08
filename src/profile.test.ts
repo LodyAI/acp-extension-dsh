@@ -17,6 +17,7 @@ describe('DeepSeek Harness profile', () => {
     expect(DEEPSEEK_HARNESS_NPX_PACKAGES).toEqual(
       expect.arrayContaining([
         '@deepseek-ai/dsh-agent-presets',
+        '@deepseek-ai/dsh-settings-file',
         '@deepseek-ai/dsh-agent-tool-presentation',
         '@deepseek-ai/dsh-attachment-local',
         '@deepseek-ai/dsh-mcp-client',
@@ -43,6 +44,7 @@ describe('DeepSeek Harness profile', () => {
     );
 
     expect(config).toContain("name: '@deepseek-ai/dsh-agent-presets'");
+    expect(config).toContain("- id: settings\n  name: '@deepseek-ai/dsh-settings-file'");
     expect(config).toContain('default: standard');
     expect(config).toContain('path: "/opt/deepseek-agent-presets"');
     expect(config).toContain('openAt: never');
@@ -51,12 +53,13 @@ describe('DeepSeek Harness profile', () => {
     expect(config).not.toContain('ACP_EXTENSION_DSH_MODELS');
     expect(config).toContain('model: deepseek-v4-pro');
     expect(config).toContain('name: "/opt/acp-extension-dsh.js"');
+    expect(config).toContain('name: "/opt/acp-extension-dsh.js"\n  inject: [settings]');
     expect(config).toContain('compression: zstd');
     expect(config).not.toMatch(/api[_-]?key:\s+[^D\n]/iu);
   });
 
   it('invalidates cached probes when the generated profile contract changes', () => {
-    expect(ACP_EXTENSION_DSH_PROFILE_REVISION).toBe('v9');
+    expect(ACP_EXTENSION_DSH_PROFILE_REVISION).toBe('v10');
   });
 
   it('defaults to upstream-compatible zstd and permits a detected legacy raw root', () => {

@@ -33,6 +33,33 @@ endpoint cannot provide a usable list. Without an endpoint, the Harness catalog
 remains advisory: an explicitly configured or selected model is still resolved
 even when it is not listed.
 
+The ACP host mounts Harness's file-backed settings provider. It reads
+`$DSH_HOME/settings.yaml`, falling back to `~/.dsh/settings.yaml`, and exposes
+user sections to settings-aware plugins. Missing settings preserve composition
+defaults; malformed settings documents fail startup instead of being silently ignored.
+The `llm-deepseek.models` array replaces the local catalog in full, so retain any
+default models and their vision metadata that should remain selectable. For example:
+
+```yaml
+llm-deepseek:
+  models:
+    - id: deepseek-v4-flash
+      name: DeepSeek-V4-Flash
+    - id: deepseek-v4-pro
+      name: DeepSeek-V4-Pro
+    - id: deepseek-v4-flash-vision-exp
+      name: DeepSeek-V4-Flash-Vision-Exp
+      inputModalities: [text, image]
+    - id: custom-model
+      name: Custom model
+```
+
+The provider watches file edits, but ACP model choices are cached per connection.
+Reconnect and refresh the host's model capabilities after catalog edits.
+`DEEPSEEK_BASE_URL` still selects endpoint discovery: this setting does not merge
+local-only model IDs into an endpoint's `/models` response. API credentials remain
+in the host environment; generated compositions contain no credentials.
+
 ## Exports
 
 - `acp-extension-dsh` exports the Cordis plugin: `apply`, `inject`, and `name`.
@@ -70,6 +97,21 @@ npm run format:check
 ```
 
 Node.js 22 or newer is required.
+
+The optional real-runtime settings regression test uses a preinstalled profile
+closure. Install every package in `DEEPSEEK_HARNESS_NPX_PACKAGES` at
+`DEEPSEEK_HARNESS_VERSION` in a separate directory first, then run:
+
+```sh
+DSH_TEST_RUNTIME_ROOT=/absolute/runtime/node_modules npm run test:settings-profile
+```
+
+The test itself uses isolated temporary homes, synthetic settings, and ACP
+initialization/session creation only. It does not install packages, use API keys,
+send model requests, or edit the user's Harness home. It checks first-request
+catalog visibility, absent settings, invalid YAML, non-mapping settings documents, and
+preservation of the settings document. The profile's ACP entry explicitly waits
+for `settings` so catalog discovery cannot race the initial file read.
 
 ## Plan configuration
 
