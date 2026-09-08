@@ -31,7 +31,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "format": "prettier --write .",
-    "format:check": "prettier --check ."
+    "format:check": "prettier --check .",
+    "test:settings-profile": "npm run build && node --test scripts/settings-profile-smoke.mjs"
   },
   "repository": {
     "type": "git",

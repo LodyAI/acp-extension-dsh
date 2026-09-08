@@ -1,6 +1,6 @@
 export const ACP_EXTENSION_DSH_VERSION = '0.1.2';
 export const DEEPSEEK_HARNESS_VERSION = '0.1.1-rc.2';
-export const ACP_EXTENSION_DSH_PROFILE_REVISION = 'v9';
+export const ACP_EXTENSION_DSH_PROFILE_REVISION = 'v10';
 export const ACP_EXTENSION_DSH_SESSION_ROOT_ENV = 'ACP_EXTENSION_DSH_SESSION_ROOT';
 export const ACP_EXTENSION_DSH_QUERY_PATH_ENV = 'ACP_EXTENSION_DSH_QUERY_PATH';
 export const DEEPSEEK_HARNESS_DEFAULT_SESSION_COMPRESSION = 'zstd';
@@ -12,6 +12,7 @@ export const ACP_EXTENSION_DSH_CAPABILITY_SOURCE_VERSION = `acp-extension-dsh@${
 // or one of the four shipped Agent presets is pinned to the same Harness release.
 export const DEEPSEEK_HARNESS_NPX_PACKAGES = [
     '@deepseek-ai/dsh-acp-demo',
+    '@deepseek-ai/dsh-settings-file',
     '@deepseek-ai/dsh-agent-spine-demo',
     '@deepseek-ai/dsh-session-persistence-jsonl',
     '@deepseek-ai/dsh-session-checkpoint-policy',
@@ -130,6 +131,9 @@ export const DEEPSEEK_HARNESS_NPX_PACKAGES = [
  */
 export function createDeepSeekHarnessCordisConfig(adapterPath, presetRoot, sessionCompression = DEEPSEEK_HARNESS_DEFAULT_SESSION_COMPRESSION) {
     return `# Generated for acp-extension-dsh. API credentials stay in the host environment.
+- id: settings
+  name: '@deepseek-ai/dsh-settings-file'
+
 - id: agent-spine
   name: '@deepseek-ai/dsh-agent-spine-demo'
   config:
@@ -290,6 +294,7 @@ export function createDeepSeekHarnessCordisConfig(adapterPath, presetRoot, sessi
 
 - id: acp-agent
   name: ${JSON.stringify(adapterPath)}
+  inject: [settings]
   config:
     provider: deepseek-official
     model: deepseek-v4-pro
