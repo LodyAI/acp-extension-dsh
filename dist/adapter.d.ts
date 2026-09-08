@@ -83,6 +83,7 @@ type HarnessPermissionOption = {
     description?: string;
 };
 type HarnessAgentContext = {
+    get(name: string): unknown;
     on<TArgs extends unknown[]>(event: string, listener: (...args: TArgs) => unknown): () => void;
     plugin(plugin: HarnessPlugin, config: HarnessMcpClientConfig): HarnessPluginHandle;
     loader: {

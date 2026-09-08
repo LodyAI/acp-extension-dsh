@@ -162,12 +162,25 @@ describe('DeepSeek Harness ACP adapter', () => {
     const agentPresetSwitches: string[] = [];
     const sessionUpdates: Array<{ sessionId: string; update: Record<string, unknown> }> = [];
     let currentPermission = 'workspace-write';
+    let planActive = false;
+    let planPending: boolean | undefined;
+    let hasPlanService = true;
     let createdHarnessSession: unknown;
 
     const context: Parameters<typeof apply>[0] = {
       agents: {
         async create(options) {
           const agentContext: Parameters<typeof options.setup>[0] = {
+            get: (name) =>
+              name === 'planMode' && hasPlanService
+                ? {
+                    get: () => ({ active: planActive, pending: planPending }),
+                    set: (_agent: unknown, active: boolean) => {
+                      planActive = active;
+                      return 'committed';
+                    },
+                  }
+                : undefined,
             on<TArgs extends unknown[]>(
               event: string,
               listener: (...args: TArgs) => unknown
@@ -226,6 +239,7 @@ describe('DeepSeek Harness ACP adapter', () => {
         mount: async (_agentContext, id = 'standard') => ({ id }),
         recompose: async (_agentContext, id) => {
           agentPresetSwitches.push(id);
+          hasPlanService = id !== 'minimal';
           return { id };
         },
       },
@@ -300,6 +314,38 @@ describe('DeepSeek Harness ACP adapter', () => {
     const requestHeaders = fetchModels.mock.calls[0]![1]?.headers;
     expect(requestHeaders).toBeInstanceOf(Headers);
     expect((requestHeaders as Headers).get('authorization')).toBe('Bearer sk-test');
+
+    for (const active of [true, false]) {
+      const response = await client.setSessionConfigOption({
+        sessionId: created.sessionId,
+        configId: 'plan_mode',
+        type: 'boolean',
+        value: active,
+      });
+      expect(planActive).toBe(active);
+      expect(response.configOptions.find((option) => option.id === 'plan_mode')).toMatchObject({
+        type: 'boolean',
+        currentValue: active,
+      });
+      expect(currentPermission).toBe('workspace-write');
+    }
+    await expect(
+      client.setSessionConfigOption({
+        sessionId: created.sessionId,
+        configId: 'plan_mode',
+        value: 'true',
+      })
+    ).rejects.toThrow();
+
+    planPending = true;
+    const pendingResponse = await client.setSessionConfigOption({
+      sessionId: created.sessionId,
+      configId: 'reasoning_effort',
+      value: 'low',
+    });
+    expect(selectValue(pendingResponse.configOptions, 'plan_mode')).toBe(true);
+    expect(planActive).toBe(false);
+    planPending = undefined;
 
     const modelResponse = await client.setSessionConfigOption({
       sessionId: created.sessionId,
@@ -377,6 +423,15 @@ describe('DeepSeek Harness ACP adapter', () => {
     });
     expect(selectValue(presetResponse.configOptions, 'agent_preset')).toBe('minimal');
     expect(agentPresetSwitches).toEqual(['minimal']);
+    expect(selectOption(presetResponse.configOptions, 'plan_mode')).toBeUndefined();
+    await expect(
+      client.setSessionConfigOption({
+        sessionId: created.sessionId,
+        configId: 'plan_mode',
+        type: 'boolean',
+        value: true,
+      })
+    ).rejects.toThrow();
 
     const assemblyListener = scopedListeners.get('system-prompt/assemble') as
       | ((
@@ -452,6 +507,7 @@ describe('DeepSeek Harness ACP adapter', () => {
       agents: {
         async create(options) {
           const agentContext: Parameters<typeof options.setup>[0] = {
+            get: () => undefined,
             on: () => () => undefined,
             plugin(_plugin, pluginConfig) {
               mountedConfigs.push({ ...pluginConfig });
@@ -671,6 +727,7 @@ describe('DeepSeek Harness ACP adapter', () => {
       agents: {
         async create(options) {
           const agentContext: Parameters<typeof options.setup>[0] = {
+            get: () => undefined,
             on: () => () => undefined,
             plugin: () => ({ await: () => Promise.resolve() }),
             loader: {
@@ -864,6 +921,7 @@ describe('DeepSeek Harness ACP adapter', () => {
       agents: {
         async create(options) {
           const agentContext: Parameters<typeof options.setup>[0] = {
+            get: () => undefined,
             on: () => () => undefined,
             plugin: () => ({ await: () => Promise.resolve() }),
             loader: {
@@ -1098,6 +1156,7 @@ describe('DeepSeek Harness ACP adapter', () => {
       agents: {
         async create(options) {
           const agentContext: Parameters<typeof options.setup>[0] = {
+            get: () => undefined,
             on: () => () => undefined,
             plugin: () => ({ await: () => Promise.resolve() }),
             loader: {
@@ -1194,6 +1253,7 @@ describe('DeepSeek Harness ACP adapter', () => {
       agents: {
         async create(options) {
           const agentContext: Parameters<typeof options.setup>[0] = {
+            get: () => undefined,
             on: () => () => undefined,
             plugin: () => ({ await: () => Promise.resolve() }),
             loader: {

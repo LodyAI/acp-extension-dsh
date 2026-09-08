@@ -56,7 +56,7 @@ describe('DeepSeek Harness profile', () => {
   });
 
   it('invalidates cached probes when the generated profile contract changes', () => {
-    expect(ACP_EXTENSION_DSH_PROFILE_REVISION).toBe('v8');
+    expect(ACP_EXTENSION_DSH_PROFILE_REVISION).toBe('v9');
   });
 
   it('defaults to upstream-compatible zstd and permits a detected legacy raw root', () => {
