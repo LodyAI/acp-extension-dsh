@@ -36,7 +36,7 @@ const cases = [
 ];
 
 for (const fixture of cases) {
-  test(fixture.name, { timeout: 30_000 }, async (t) => {
+  await test(fixture.name, { timeout: 30_000 }, async (t) => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-settings-test-'));
     let child;
     let exited;
