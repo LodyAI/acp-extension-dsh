@@ -1,6 +1,8 @@
-export const ACP_EXTENSION_DSH_VERSION = '0.1.2';
+export const ACP_EXTENSION_DSH_VERSION = '0.1.3';
 export const DEEPSEEK_HARNESS_VERSION = '0.1.1-rc.2';
-export const ACP_EXTENSION_DSH_PROFILE_REVISION = 'v10';
+export const DEEPSEEK_HARNESS_PI_AI_VERSION = '0.82.1';
+export const DEEPSEEK_HARNESS_SCHEMASTERY_VERSION = '3.18.1';
+export const ACP_EXTENSION_DSH_PROFILE_REVISION = 'v11';
 export const ACP_EXTENSION_DSH_SESSION_ROOT_ENV = 'ACP_EXTENSION_DSH_SESSION_ROOT';
 export const ACP_EXTENSION_DSH_QUERY_PATH_ENV = 'ACP_EXTENSION_DSH_QUERY_PATH';
 export const DEEPSEEK_HARNESS_DEFAULT_SESSION_COMPRESSION = 'zstd';
@@ -23,6 +25,7 @@ export const DEEPSEEK_HARNESS_NPX_PACKAGES = [
   '@deepseek-ai/dsh-session-query-sqlite',
   '@deepseek-ai/dsh-attachment-local',
   '@deepseek-ai/dsh-llm-deepseek',
+  '@deepseek-ai/dsh-llm-pi-ai',
   '@deepseek-ai/dsh-sandbox-local',
   '@deepseek-ai/dsh-sandbox-policy',
   '@deepseek-ai/dsh-subprocess-local',
@@ -89,6 +92,7 @@ export const DEEPSEEK_HARNESS_NPX_PACKAGES = [
   '@deepseek-ai/dsh-agent-loop',
   '@deepseek-ai/dsh-anonymous-user-id',
   '@deepseek-ai/dsh-app-boot',
+  '@deepseek-ai/dsh-authorization',
   '@deepseek-ai/dsh-atomic-write',
   '@deepseek-ai/dsh-attachment',
   '@deepseek-ai/dsh-bash-local',
@@ -126,6 +130,16 @@ export const DEEPSEEK_HARNESS_NPX_PACKAGES = [
   '@deepseek-ai/dsh-tools',
   '@deepseek-ai/dsh-typert-protocol',
   '@deepseek-ai/dsh-workflow',
+] as const;
+
+// Pin pi-ai's direct dependency closure too. A direct npx package spec wins the
+// adapter's published caret ranges and keeps cold installs reproducible.
+export const DEEPSEEK_HARNESS_NPX_PACKAGE_SPECS = [
+  ...DEEPSEEK_HARNESS_NPX_PACKAGES.map(
+    (packageName) => `${packageName}@${DEEPSEEK_HARNESS_VERSION}`
+  ),
+  `@earendil-works/pi-ai@${DEEPSEEK_HARNESS_PI_AI_VERSION}`,
+  `@deepseek-ai/schemastery@${DEEPSEEK_HARNESS_SCHEMASTERY_VERSION}`,
 ] as const;
 
 /**
@@ -178,6 +192,14 @@ export function createDeepSeekHarnessCordisConfig(
   config:
     thinking: enabled
     reasoningEffort: max
+
+# Dormant until llm-pi-ai.providers in settings.yaml declares a route. The
+# upstream adapter owns profile validation, route lifecycle, and credentials.
+- id: llm-pi-ai
+  name: '@deepseek-ai/dsh-llm-pi-ai'
+  inject: [settings]
+  config:
+    providers: {}
 
 - id: sandbox
   name: '@deepseek-ai/dsh-sandbox-local'
