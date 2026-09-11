@@ -34,6 +34,7 @@ const DEFAULT_MODELS = [
 ] as const;
 
 const DEFAULT_LLM_CATALOG = {
+  listProviders: () => [{ id: 'deepseek-official', name: 'DeepSeek' }],
   listModels: async (provider: string) =>
     DEFAULT_MODELS.map((model) => ({
       provider,
@@ -66,6 +67,10 @@ const DEFAULT_LLM_CATALOG = {
     };
   },
 };
+
+function acpModelId(provider: string, model: string): string {
+  return `dsh-route:${Buffer.from(JSON.stringify([provider, model])).toString('base64url')}`;
+}
 
 const PERMISSION_OPTIONS = {
   'read-only': {
@@ -166,6 +171,43 @@ describe('DeepSeek Harness ACP adapter', () => {
     let planPending: boolean | undefined;
     let hasPlanService = true;
     let createdHarnessSession: unknown;
+    const activeProviders = new Set(['deepseek-official', 'acme-route']);
+    const llm = {
+      listProviders: () => [
+        { id: 'deepseek-official', name: 'DeepSeek' },
+        { id: 'acme-route', name: 'Acme' },
+      ],
+      listModels: async (provider: string) => [
+        {
+          provider,
+          id: 'kimi-k3',
+          name: provider === 'acme-route' ? 'Acme K3' : 'Kimi K3',
+          inputModalities: ['text'],
+        },
+      ],
+      resolveModelInfo: async (provider: string, modelId: string) => {
+        if (!activeProviders.has(provider)) throw new Error(`no adapter for ${provider}`);
+        return {
+          provider,
+          id: modelId,
+          name: provider === 'acme-route' ? `Acme ${modelId}` : modelId,
+          inputModalities: ['text'],
+          ...(modelId === 'no-reasoning'
+            ? {}
+            : {
+                reasoning: {
+                  efforts: [
+                    { id: 'off', name: 'Off' },
+                    { id: 'low', name: 'Low' },
+                    { id: 'high', name: 'High' },
+                    { id: 'max', name: 'Max' },
+                  ],
+                  defaultEffort: 'max',
+                },
+              }),
+        };
+      },
+    };
 
     const context: Parameters<typeof apply>[0] = {
       agents: {
@@ -251,7 +293,7 @@ describe('DeepSeek Harness ACP adapter', () => {
         harnessListeners.set(event, listener as Listener);
         return () => harnessListeners.delete(event);
       },
-      get: testHarnessService,
+      get: (service) => (service === 'llm' ? llm : undefined),
       effect: (register) => {
         disposers.push(register());
       },
@@ -284,7 +326,9 @@ describe('DeepSeek Harness ACP adapter', () => {
     const created = await client.newSession({ cwd: process.cwd(), mcpServers: [] });
     expect(created.modes?.currentModeId).toBe('workspace-write');
     expect(selectValue(created.configOptions, 'agent_preset')).toBe('standard');
-    expect(selectValue(created.configOptions, 'model')).toBe('kimi-k3');
+    expect(selectValue(created.configOptions, 'model')).toBe(
+      acpModelId('deepseek-official', 'kimi-k3')
+    );
     expect(selectValue(created.configOptions, 'reasoning_effort')).toBe('max');
     expect(selectOption(created.configOptions, 'agent_preset')).toMatchObject({
       options: [
@@ -298,8 +342,12 @@ describe('DeepSeek Harness ACP adapter', () => {
     });
     expect(selectOption(created.configOptions, 'model')).toMatchObject({
       options: [
-        expect.objectContaining({ value: 'kimi-k3' }),
-        expect.objectContaining({ value: 'kimi-k2.6' }),
+        expect.objectContaining({ value: acpModelId('deepseek-official', 'kimi-k3') }),
+        expect.objectContaining({ value: acpModelId('deepseek-official', 'kimi-k2.6') }),
+        expect.objectContaining({
+          value: acpModelId('acme-route', 'kimi-k3'),
+          name: 'Acme kimi-k3 (acme-route)',
+        }),
       ],
     });
     expect(fetchModels).toHaveBeenCalledOnce();
@@ -347,12 +395,31 @@ describe('DeepSeek Harness ACP adapter', () => {
     expect(planActive).toBe(false);
     planPending = undefined;
 
+    const customRouteResponse = await client.setSessionConfigOption({
+      sessionId: created.sessionId,
+      configId: 'model',
+      value: acpModelId('acme-route', 'kimi-k3'),
+    });
+    expect(selectValue(customRouteResponse.configOptions, 'model')).toBe(
+      acpModelId('acme-route', 'kimi-k3')
+    );
+    activeProviders.delete('acme-route');
+    await expect(
+      client.setSessionConfigOption({
+        sessionId: created.sessionId,
+        configId: 'model',
+        value: acpModelId('acme-route', 'kimi-k3'),
+      })
+    ).rejects.toThrow(/failed to resolve model route "acme-route" \/ "kimi-k3": no adapter/u);
+    activeProviders.add('acme-route');
     const modelResponse = await client.setSessionConfigOption({
       sessionId: created.sessionId,
       configId: 'model',
-      value: 'kimi-k2.6',
+      value: acpModelId('deepseek-official', 'kimi-k2.6'),
     });
-    expect(selectValue(modelResponse.configOptions, 'model')).toBe('kimi-k2.6');
+    expect(selectValue(modelResponse.configOptions, 'model')).toBe(
+      acpModelId('deepseek-official', 'kimi-k2.6')
+    );
 
     const effortResponse = await client.setSessionConfigOption({
       sessionId: created.sessionId,
@@ -471,9 +538,12 @@ describe('DeepSeek Harness ACP adapter', () => {
       value: 'gateway-model',
     });
     expect(selectOption(unlistedModel.configOptions, 'model')).toMatchObject({
-      currentValue: 'gateway-model',
+      currentValue: acpModelId('deepseek-official', 'gateway-model'),
       options: expect.arrayContaining([
-        expect.objectContaining({ value: 'gateway-model', name: 'gateway-model' }),
+        expect.objectContaining({
+          value: acpModelId('deepseek-official', 'gateway-model'),
+          name: 'gateway-model (deepseek-official)',
+        }),
       ]),
     });
 
@@ -802,16 +872,16 @@ describe('DeepSeek Harness ACP adapter', () => {
     expect(initialized.agentCapabilities.promptCapabilities.image).toBe(true);
     const session = await client.newSession({ cwd: process.cwd(), mcpServers: [] });
     expect(selectOption(session.configOptions, 'model')).toMatchObject({
-      currentValue: 'runtime-vision',
+      currentValue: acpModelId('deepseek-official', 'runtime-vision'),
       options: [
         {
-          value: 'runtime-text',
-          name: 'Runtime text',
+          value: acpModelId('deepseek-official', 'runtime-text'),
+          name: 'Runtime text (deepseek-official)',
           description: 'Discovered text model',
         },
         {
-          value: 'runtime-vision',
-          name: 'Runtime vision',
+          value: acpModelId('deepseek-official', 'runtime-vision'),
+          name: 'Runtime vision (deepseek-official)',
           description: 'Discovered vision model',
         },
       ],
@@ -826,12 +896,16 @@ describe('DeepSeek Harness ACP adapter', () => {
         }
       ).models
     ).toMatchObject({
-      currentModelId: 'runtime-vision',
+      currentModelId: acpModelId('deepseek-official', 'runtime-vision'),
       availableModels: expect.arrayContaining([
-        expect.objectContaining({ modelId: 'runtime-text' }),
-        expect.objectContaining({ modelId: 'runtime-text[off]' }),
-        expect.objectContaining({ modelId: 'runtime-vision' }),
-        expect.objectContaining({ modelId: 'runtime-vision[off]' }),
+        expect.objectContaining({ modelId: acpModelId('deepseek-official', 'runtime-text') }),
+        expect.objectContaining({
+          modelId: `${acpModelId('deepseek-official', 'runtime-text')}[off]`,
+        }),
+        expect.objectContaining({ modelId: acpModelId('deepseek-official', 'runtime-vision') }),
+        expect.objectContaining({
+          modelId: `${acpModelId('deepseek-official', 'runtime-vision')}[off]`,
+        }),
       ]),
     });
     expect(llm.listModels).toHaveBeenCalledWith('deepseek-official');

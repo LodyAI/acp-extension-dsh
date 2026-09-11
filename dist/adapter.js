@@ -42,6 +42,7 @@ const MODEL_DISCOVERY_TIMEOUT_MS = 15_000;
 const MODEL_DISCOVERY_MAX_BYTES = 1024 * 1024;
 const MODEL_DISCOVERY_MAX_MODELS = 1_000;
 const MODEL_ID_MAX_LENGTH = 512;
+const ACP_MODEL_ID_PREFIX = 'dsh-route:';
 const INVALID_MCP_SERVER_NAME_CHARS = /[^A-Za-z0-9_-]/gu;
 const IMAGE_MEDIA_TYPES = [
     'image/png',
@@ -80,36 +81,70 @@ function resolveAdapterConfig(config) {
         ...(config?.stream ? { stream: config.stream } : {}),
     };
 }
-async function loadHarnessModels(llm, provider, configuredModel, endpoint) {
-    const listed = endpoint
-        ? (await discoverDeepSeekModelIds(endpoint.baseUrl, endpoint.apiKey)).map((id) => ({
-            provider,
-            id,
-        }))
-        : await llm.listModels(provider);
-    const modelIds = [];
-    const ids = new Set();
-    for (const model of listed) {
-        if (model.provider !== provider || !model.id.trim())
-            continue;
-        if (ids.has(model.id)) {
-            throw new Error(`acp-extension-dsh: duplicate model ${JSON.stringify(model.id)} for provider ${JSON.stringify(provider)}`);
+async function loadHarnessModels(llm, defaultProvider, configuredModel, endpoint) {
+    const providers = llm.listProviders?.() ?? [{ id: defaultProvider, name: defaultProvider }];
+    if (!providers.some(({ id }) => id === defaultProvider)) {
+        throw new Error(`configured provider ${JSON.stringify(defaultProvider)} is unavailable`);
+    }
+    const identities = [];
+    for (const { id: provider } of providers) {
+        const listed = endpoint && provider === defaultProvider
+            ? (await discoverDeepSeekModelIds(endpoint.baseUrl, endpoint.apiKey)).map((id) => ({
+                provider,
+                id,
+            }))
+            : await llm.listModels(provider);
+        const ids = new Set();
+        for (const model of listed) {
+            if (model.provider !== provider || !model.id.trim())
+                continue;
+            if (ids.has(model.id)) {
+                throw new Error(`acp-extension-dsh: duplicate model ${JSON.stringify(model.id)} for provider ${JSON.stringify(provider)}`);
+            }
+            ids.add(model.id);
+            identities.push({ provider, model: model.id });
         }
-        ids.add(model.id);
-        modelIds.push(model.id);
+        if (endpoint && provider === defaultProvider && ids.size === 0) {
+            throw new Error('the endpoint returned no usable models');
+        }
+        // Without endpoint discovery, the Harness catalog remains advisory. An
+        // explicitly configured default route may name an unlisted model.
+        if (provider === defaultProvider && !endpoint && !ids.has(configuredModel)) {
+            identities.unshift({ provider, model: configuredModel });
+        }
     }
-    if (endpoint && modelIds.length === 0) {
+    const initialSelection = endpoint
+        ? identities.find(({ provider }) => provider === defaultProvider)
+        : { provider: defaultProvider, model: configuredModel };
+    if (!initialSelection)
         throw new Error('the endpoint returned no usable models');
-    }
-    // Without endpoint discovery, the Harness catalog remains advisory. An
-    // explicitly configured route may name an unlisted model.
-    if (!endpoint && !ids.has(configuredModel))
-        modelIds.unshift(configuredModel);
-    const initialModel = endpoint ? modelIds[0] : configuredModel;
     return {
-        models: await Promise.all(modelIds.map((modelId) => resolveHarnessModel(llm, provider, modelId))),
-        initialModel,
+        models: await Promise.all(identities.map(({ provider, model }) => resolveHarnessModel(llm, provider, model))),
+        initialSelection,
     };
+}
+function encodeAcpModelId(provider, model) {
+    return `${ACP_MODEL_ID_PREFIX}${Buffer.from(JSON.stringify([provider, model])).toString('base64url')}`;
+}
+function decodeAcpModelId(value, legacyProvider) {
+    if (!value.startsWith(ACP_MODEL_ID_PREFIX))
+        return { provider: legacyProvider, model: value };
+    try {
+        const decoded = JSON.parse(Buffer.from(value.slice(ACP_MODEL_ID_PREFIX.length), 'base64url').toString('utf8'));
+        if (Array.isArray(decoded) &&
+            decoded.length === 2 &&
+            decoded.every((part) => typeof part === 'string' && part.trim())) {
+            return { provider: decoded[0], model: decoded[1] };
+        }
+    }
+    catch {
+        // Fall through to the stable ACP invalid-params response below.
+    }
+    throw invalidParams('model route id is invalid');
+}
+function selectedModel(record) {
+    return record.models.find((candidate) => candidate.provider === record.selection.current.provider &&
+        candidate.id === record.selection.current.model);
 }
 function modelDiscoveryUrl(baseUrl) {
     const url = new URL(baseUrl);
@@ -352,13 +387,13 @@ function configOptions(record) {
         {
             id: MODEL_CONFIG_ID,
             name: 'Model',
-            description: 'DeepSeek model used for the session',
+            description: 'Provider route and model used for the session',
             category: 'model',
             type: 'select',
-            currentValue: record.selection.current.model,
+            currentValue: encodeAcpModelId(record.selection.current.provider, record.selection.current.model),
             options: record.models.map((model) => ({
-                value: model.id,
-                name: model.name,
+                value: encodeAcpModelId(model.provider, model.id),
+                name: `${model.name} (${model.provider})`,
                 description: model.description ?? null,
             })),
         },
@@ -368,7 +403,7 @@ function configOptions(record) {
         const state = plan.get(record.agent);
         options.push(createPlanModeConfigOption(state.pending ?? state.active));
     }
-    const model = record.models.find((candidate) => candidate.id === record.selection.current.model);
+    const model = selectedModel(record);
     if (model?.reasoning && record.selection.current.reasoningEffort) {
         options.push({
             id: REASONING_EFFORT_CONFIG_ID,
@@ -388,16 +423,16 @@ function configOptions(record) {
 }
 function legacyModels(record) {
     return {
-        currentModelId: record.selection.current.model,
+        currentModelId: encodeAcpModelId(record.selection.current.provider, record.selection.current.model),
         availableModels: record.models.flatMap((model) => [
             {
-                modelId: model.id,
-                name: model.name,
+                modelId: encodeAcpModelId(model.provider, model.id),
+                name: `${model.name} (${model.provider})`,
                 description: model.description ?? null,
             },
             ...(model.reasoning?.efforts.map((effort) => ({
-                modelId: `${model.id}[${effort.id}]`,
-                name: `${model.name} (${effort.name})`,
+                modelId: `${encodeAcpModelId(model.provider, model.id)}[${effort.id}]`,
+                name: `${model.name} (${model.provider}, ${effort.name})`,
                 description: model.description ?? null,
             })) ?? []),
         ]),
@@ -938,9 +973,10 @@ export function apply(ctx, rawConfig) {
             });
         }
         else if (params.configId === MODEL_CONFIG_ID) {
-            return resolveHarnessModel(llm, record.selection.current.provider, value)
+            const selected = decodeAcpModelId(value, record.selection.current.provider);
+            return resolveHarnessModel(llm, selected.provider, selected.model)
                 .then((model) => {
-                const index = record.models.findIndex((candidate) => candidate.id === value);
+                const index = record.models.findIndex((candidate) => candidate.provider === selected.provider && candidate.id === selected.model);
                 if (index === -1)
                     record.models.push(model);
                 else
@@ -950,8 +986,8 @@ export function apply(ctx, rawConfig) {
                     ? record.selection.current.reasoningEffort
                     : undefined);
                 record.selection.current = {
-                    provider: record.selection.current.provider,
-                    model: value,
+                    provider: selected.provider,
+                    model: selected.model,
                     ...(reasoningEffort ? { reasoningEffort } : {}),
                 };
                 return { configOptions: configOptions(record) };
@@ -959,11 +995,11 @@ export function apply(ctx, rawConfig) {
                 .catch((error) => {
                 if (error instanceof RequestError)
                     throw error;
-                throw invalidParams(`failed to resolve model ${JSON.stringify(value)}: ${errorChain(error)}`);
+                throw invalidParams(`failed to resolve model route ${JSON.stringify(selected.provider)} / ${JSON.stringify(selected.model)}: ${errorChain(error)}`);
             });
         }
         else if (params.configId === REASONING_EFFORT_CONFIG_ID) {
-            const model = record.models.find((candidate) => candidate.id === record.selection.current.model);
+            const model = selectedModel(record);
             if (!model)
                 throw internalError('selected model metadata is unavailable');
             const reasoningEffort = resolveReasoningEffort(model, value);
@@ -1015,16 +1051,16 @@ export function apply(ctx, rawConfig) {
                 catch (error) {
                     throw internalError(`failed to discover models: ${errorChain(error)}`);
                 }
-                const { models, initialModel: initialModelId } = catalog;
+                const { models, initialSelection } = catalog;
                 const sessionId = randomUUID();
-                const initialModel = models.find((model) => model.id === initialModelId);
+                const initialModel = models.find((model) => model.provider === initialSelection.provider && model.id === initialSelection.model);
                 if (!initialModel)
                     throw internalError('initial model metadata is unavailable');
                 const reasoningEffort = resolveReasoningEffort(initialModel, config.reasoningEffort);
                 const selection = {
                     current: {
-                        provider: config.provider,
-                        model: initialModelId,
+                        provider: initialSelection.provider,
+                        model: initialSelection.model,
                         ...(reasoningEffort ? { reasoningEffort } : {}),
                     },
                 };
@@ -1040,7 +1076,10 @@ export function apply(ctx, rawConfig) {
                     handle = await ctx.agents.create({
                         sessionId,
                         meta: { cwd: params.cwd, agentPreset: requestedPreset },
-                        agentOptions: { provider: config.provider, model: initialModelId },
+                        agentOptions: {
+                            provider: initialSelection.provider,
+                            model: initialSelection.model,
+                        },
                         setup: async (agentContext) => {
                             installModelSelection(agentContext, selection);
                             mountedPreset = (await ctx.agentPresets.mount(agentContext, requestedPreset)).id;

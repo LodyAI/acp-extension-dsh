@@ -18,9 +18,11 @@ Committed assistant images are read back through the attachment store and sent a
 ACP image blocks. Prompt completion and cancellation wait for admission, Harness
 idle, and ordered output delivery before releasing the session's prompt slot.
 
-ACP model choices are discovered from Harness when each session is created and
+ACP model choices are discovered from every registered Harness provider route when each session is created and
 returned through both the standard `model` config option and the legacy ACP
-`models` response. Exact per-model metadata controls the reasoning selector and
+`models` response. The opaque ACP value encodes both route and model, so two routes
+may advertise the same model id without colliding. Labels include the route name.
+Exact per-model metadata controls the reasoning selector and
 image admission, and the legacy response carries `model[effort]` entries so a
 host can cache the reasoning choices for every model rather than only the model
 that happened to be active during the probe. Permission choices use the composed
@@ -59,6 +61,31 @@ Reconnect and refresh the host's model capabilities after catalog edits.
 `DEEPSEEK_BASE_URL` still selects endpoint discovery: this setting does not merge
 local-only model IDs into an endpoint's `/models` response. API credentials remain
 in the host environment; generated compositions contain no credentials.
+
+The host also mounts `dsh-llm-pi-ai` with an empty base profile. It remains dormant
+until `settings.yaml` adds a supported route, for example alongside the unchanged
+DeepSeek configuration:
+
+```yaml
+llm-pi-ai:
+  providers:
+    acme-gateway:
+      displayName: Acme Gateway
+      apiKeyEnv: ACME_GATEWAY_API_KEY
+      api: openai-completions
+      baseURL: https://gateway.example/v1
+      models:
+        - id: shared-model
+          name: Shared model
+          contextWindow: 65536
+          maxTokens: 4096
+```
+
+`apiKeyEnv` is a reference resolved by Harness for each request. The key itself is
+not copied into settings, the generated profile, ACP capability data, or Lody's
+workspace state. Removing a route or leaving its named credential unavailable fails
+that selection explicitly; the adapter does not switch back to DeepSeek. Reconnect
+and refresh capabilities after changing the route catalog.
 
 ## Exports
 
@@ -108,9 +135,10 @@ DSH_TEST_RUNTIME_ROOT=/absolute/runtime/node_modules npm run test:settings-profi
 
 The test itself uses isolated temporary homes, synthetic settings, and ACP
 initialization/session creation only. It does not install packages, use API keys,
-send model requests, or edit the user's Harness home. It checks first-request
+or edit the user's Harness home. It checks first-request
 catalog visibility, absent settings, invalid YAML, non-mapping settings documents, and
-preservation of the settings document. The profile's ACP entry explicitly waits
+preservation of the settings document. A synthetic pi-ai prompt also verifies that a
+named but absent credential fails before provider I/O. The profile's ACP entry explicitly waits
 for `settings` so catalog discovery cannot race the initial file read.
 
 ## Plan configuration

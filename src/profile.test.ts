@@ -2,9 +2,13 @@ import { readFile } from 'node:fs/promises';
 import { describe, expect, it } from 'vitest';
 
 import {
+  ACP_EXTENSION_DSH_VERSION,
   ACP_EXTENSION_DSH_PROFILE_REVISION,
   DEEPSEEK_HARNESS_DEFAULT_SESSION_COMPRESSION,
+  DEEPSEEK_HARNESS_NPX_PACKAGE_SPECS,
   DEEPSEEK_HARNESS_NPX_PACKAGES,
+  DEEPSEEK_HARNESS_PI_AI_VERSION,
+  DEEPSEEK_HARNESS_SCHEMASTERY_VERSION,
   DEEPSEEK_HARNESS_VERSION,
   createDeepSeekHarnessCordisConfig,
 } from './profile.js';
@@ -20,6 +24,8 @@ describe('DeepSeek Harness profile', () => {
         '@deepseek-ai/dsh-settings-file',
         '@deepseek-ai/dsh-agent-tool-presentation',
         '@deepseek-ai/dsh-attachment-local',
+        '@deepseek-ai/dsh-authorization',
+        '@deepseek-ai/dsh-llm-pi-ai',
         '@deepseek-ai/dsh-mcp-client',
         '@deepseek-ai/dsh-tool-cordis',
         '@deepseek-ai/dsh-tool-pwsh-persistent',
@@ -35,6 +41,13 @@ describe('DeepSeek Harness profile', () => {
       ])
     );
     expect(DEEPSEEK_HARNESS_NPX_PACKAGES).not.toContain('@deepseek-ai/dsh');
+    expect(DEEPSEEK_HARNESS_NPX_PACKAGE_SPECS).toEqual(
+      expect.arrayContaining([
+        `@deepseek-ai/dsh-llm-pi-ai@${DEEPSEEK_HARNESS_VERSION}`,
+        `@earendil-works/pi-ai@${DEEPSEEK_HARNESS_PI_AI_VERSION}`,
+        `@deepseek-ai/schemastery@${DEEPSEEK_HARNESS_SCHEMASTERY_VERSION}`,
+      ])
+    );
   });
 
   it('generates a credential-free host composition around the adapter and preset root', () => {
@@ -50,6 +63,9 @@ describe('DeepSeek Harness profile', () => {
     expect(config).toContain('openAt: never');
     expect(config).toContain("name: '@deepseek-ai/dsh-code-runtime-worker-thread'");
     expect(config).toContain("name: '@deepseek-ai/dsh-attachment-local'");
+    expect(config).toContain(
+      "- id: llm-pi-ai\n  name: '@deepseek-ai/dsh-llm-pi-ai'\n  inject: [settings]\n  config:\n    providers: {}"
+    );
     expect(config).not.toContain('ACP_EXTENSION_DSH_MODELS');
     expect(config).toContain('model: deepseek-v4-pro');
     expect(config).toContain('name: "/opt/acp-extension-dsh.js"');
@@ -59,7 +75,8 @@ describe('DeepSeek Harness profile', () => {
   });
 
   it('invalidates cached probes when the generated profile contract changes', () => {
-    expect(ACP_EXTENSION_DSH_PROFILE_REVISION).toBe('v10');
+    expect(ACP_EXTENSION_DSH_VERSION).toBe('0.1.3');
+    expect(ACP_EXTENSION_DSH_PROFILE_REVISION).toBe('v11');
   });
 
   it('defaults to upstream-compatible zstd and permits a detected legacy raw root', () => {

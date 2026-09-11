@@ -19,12 +19,39 @@ const runtimeRequire = createRequire(join(runtimeRoot, '.settings-profile-test.c
 const extensionRoot = fileURLToPath(new URL('../', import.meta.url));
 const bin = runtimeRequire.resolve('@deepseek-ai/dsh-acp-demo/bin');
 
+function decodeModelRoute(value) {
+  if (!value.startsWith('dsh-route:')) return undefined;
+  const decoded = JSON.parse(
+    Buffer.from(value.slice('dsh-route:'.length), 'base64url').toString('utf8')
+  );
+  return Array.isArray(decoded) && decoded.length === 2 ? decoded : undefined;
+}
+
 const cases = [
   {
     name: 'settings catalog is available to the first ACP request',
     settings:
       '# preserved comment\nllm-deepseek:\n  models:\n    - id: synthetic-settings-model\n      name: Synthetic settings model\n',
     expectedModel: 'synthetic-settings-model',
+  },
+  {
+    name: 'pi-ai route is selectable and a missing credential fails before provider I/O',
+    settings: `llm-pi-ai:
+  providers:
+    synthetic-route:
+      displayName: Synthetic route
+      apiKeyEnv: SYNTHETIC_ROUTE_API_KEY
+      api: openai-completions
+      baseURL: https://provider.invalid/v1
+      models:
+        - id: shared-model
+          name: Shared model
+          contextWindow: 32768
+          maxTokens: 4096
+`,
+    expectedProvider: 'synthetic-route',
+    expectedModel: 'shared-model',
+    missingCredential: true,
   },
   { name: 'absent settings retain defaults', expectedModel: 'deepseek-v4-flash' },
   { name: 'invalid YAML fails startup', settings: 'llm-deepseek: [\n', invalid: true },
@@ -99,9 +126,35 @@ for (const fixture of cases) {
         await initialized;
         const session = await connection.newSession({ cwd: root, mcpServers: [] });
         const model = session.configOptions.find((option) => option.id === 'model');
-        const ids = model.options.map((option) => option.value);
-        assert.ok(ids.includes(fixture.expectedModel), JSON.stringify(ids));
-        if (fixture.settings) assert.ok(!ids.includes('deepseek-v4-flash'));
+        const target = model.options.find((option) => {
+          const [provider, modelId] = decodeModelRoute(option.value) ?? [];
+          return (
+            modelId === fixture.expectedModel &&
+            (fixture.expectedProvider === undefined || provider === fixture.expectedProvider)
+          );
+        });
+        assert.ok(target, JSON.stringify(model.options));
+        if (fixture.settings && !fixture.expectedProvider) {
+          assert.ok(
+            !model.options.some(
+              (option) => decodeModelRoute(option.value)?.[1] === 'deepseek-v4-flash'
+            )
+          );
+        }
+        if (fixture.missingCredential) {
+          await connection.setSessionConfigOption({
+            sessionId: session.sessionId,
+            configId: 'model',
+            value: target.value,
+          });
+          await assert.rejects(
+            connection.prompt({
+              sessionId: session.sessionId,
+              prompt: [{ type: 'text', text: 'Synthetic credential boundary probe' }],
+            }),
+            /MISSING_CREDENTIAL|credential/iu
+          );
+        }
       }
       if (fixture.settings !== undefined) {
         assert.equal(await readFile(settingsPath, 'utf8'), fixture.settings);
