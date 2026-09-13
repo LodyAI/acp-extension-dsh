@@ -5,7 +5,7 @@ describe('DeepSeek request accounting', () => {
   const time = Date.parse('2026-09-14T01:00:00Z');
   it('sums steps and turns, deduplicates durable events, and retains models', () => {
     const tracker = new HarnessUsageTracker(true);
-    tracker.setRoute('deepseek', 'deepseek-v4-flash');
+    tracker.setRoute('deepseek-official', 'deepseek-v4-flash');
     const raw = { inputTokens: 100, outputTokens: 50, cacheReadTokens: 30, reasoningTokens: 20 };
     const first = tracker.record('s', 1, time, raw);
     expect(first?.usage).toMatchObject({
@@ -18,7 +18,7 @@ describe('DeepSeek request accounting', () => {
     const second = tracker.record('s', 2, time, raw);
     expect(second?.modelUsage?.['deepseek-v4-flash'].inputTokens).toBe(200);
     expect(second?.delta?.usage.inputTokens).toBe(100);
-    tracker.setRoute('deepseek', 'deepseek-v4-pro');
+    tracker.setRoute('deepseek-official', 'deepseek-v4-pro');
     expect(tracker.record('s', 1, time, raw)).toBeUndefined();
     const next = tracker.record('s', 3, time, raw);
     expect(Object.keys(next?.modelUsage ?? {})).toEqual(['deepseek-v4-flash', 'deepseek-v4-pro']);
@@ -52,7 +52,7 @@ describe('DeepSeek request accounting', () => {
       [true, NaN],
     ] as const) {
       const tracker = new HarnessUsageTracker(official);
-      tracker.setRoute('deepseek', 'deepseek-v4-pro');
+      tracker.setRoute('deepseek-official', 'deepseek-v4-pro');
       expect(
         tracker.record('s', 1, timestamp, { inputTokens: 100, outputTokens: 20 })?.usage.costUSD
       ).toBeUndefined();
@@ -61,7 +61,7 @@ describe('DeepSeek request accounting', () => {
 
   it('does not reprice older requests when the next step crosses into off-peak', () => {
     const tracker = new HarnessUsageTracker(true);
-    tracker.setRoute('deepseek', 'deepseek-flash');
+    tracker.setRoute('deepseek-official', 'deepseek-flash');
     const usage = { inputTokens: 1e6, outputTokens: 0 };
     tracker.record('s', 1, Date.parse('2026-09-14T03:59:59Z'), usage);
     const next = tracker.record('s', 2, Date.parse('2026-09-14T04:00:00Z'), usage);

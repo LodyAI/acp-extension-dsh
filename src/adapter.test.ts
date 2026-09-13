@@ -137,8 +137,9 @@ describe('DeepSeek Harness ACP adapter', () => {
     vi.unstubAllGlobals();
   });
 
-  it('applies model, reasoning-effort, and permission selections to Harness state', async () => {
-    vi.stubEnv('DEEPSEEK_BASE_URL', 'https://api.moonshot.cn/v1/');
+  const endpoints = ['https://provider.example/v1/', 'https://api.deepseek.com/v1/'];
+  it.each(endpoints)('applies settings and usage at %s', async (baseUrl) => {
+    vi.stubEnv('DEEPSEEK_BASE_URL', baseUrl);
     vi.stubEnv('DEEPSEEK_API_KEY', 'sk-test');
     const fetchModels = vi.fn(
       async (_input: RequestInfo | URL, _init?: RequestInit) =>
@@ -293,7 +294,7 @@ describe('DeepSeek Harness ACP adapter', () => {
       type: 'request/context',
       seq: 10,
       time: 0,
-      data: { provider: 'deepseek', model: 'kimi-k3' },
+      data: { provider: 'deepseek-official', model: 'deepseek-flash' },
     });
     harnessListeners.get('session/event')?.(createdHarnessSession, {
       type: 'assistant/message',
@@ -311,10 +312,11 @@ describe('DeepSeek Harness ACP adapter', () => {
         },
       },
     });
-    expect(await usageReceived).toMatchObject({
+    const reportedUsage = await usageReceived;
+    expect(reportedUsage).toMatchObject({
       sessionId: created.sessionId,
       modelUsage: {
-        'kimi-k3': {
+        'deepseek-flash': {
           inputTokens: 100,
           outputTokens: 30,
           cacheReadInputTokens: 30,
@@ -323,6 +325,17 @@ describe('DeepSeek Harness ACP adapter', () => {
       },
       delta: { usage: { inputTokens: 100 } },
     });
+    if (baseUrl === 'https://api.deepseek.com/v1/') {
+      expect(reportedUsage).toMatchObject({
+        modelUsage: {
+          'deepseek-flash': {
+            costUSD: (100 * 0.15 + 30 * 0.003 + 50 * 0.6) / 1e6,
+          },
+        },
+      });
+    } else {
+      expect(reportedUsage).not.toHaveProperty('modelUsage.deepseek-flash.costUSD');
+    }
     expect(created.modes?.currentModeId).toBe('workspace-write');
     expect(selectValue(created.configOptions, 'agent_preset')).toBe('standard');
     expect(selectValue(created.configOptions, 'model')).toBe('kimi-k3');
@@ -345,7 +358,7 @@ describe('DeepSeek Harness ACP adapter', () => {
     });
     expect(fetchModels).toHaveBeenCalledOnce();
     expect(fetchModels).toHaveBeenCalledWith(
-      new URL('https://api.moonshot.cn/v1/models'),
+      new URL('models', baseUrl),
       expect.objectContaining({
         method: 'GET',
         redirect: 'error',

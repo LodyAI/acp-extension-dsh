@@ -69,7 +69,7 @@ export class HarnessUsageTracker {
       cacheCreationInputTokens: raw.cacheWriteTokens ?? 0,
       reasoningOutputTokens: raw.reasoningTokens ?? 0,
     };
-    if (this.officialEndpoint && this.route.provider === 'deepseek') {
+    if (this.officialEndpoint && this.route.provider === 'deepseek-official') {
       const costUSD = deepSeekCostUSD(this.route.model, usage, time);
       if (costUSD !== undefined) usage.costUSD = costUSD;
     }

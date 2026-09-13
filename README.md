@@ -76,6 +76,8 @@ V4 Pro 0.66 / 0.022 / 1.98. Weekday 01:00–04:00 and 06:00–10:00 UTC are twic
 those rates. `deepseek-v4-flash` and `deepseek-v4-flash-vision-exp` now alias the
 new `deepseek-flash` price. Unknown models/custom endpoints have no estimated cost.
 These are list-price estimates, not invoices; cross-boundary requests can differ.
+Only the registered `deepseek-official` route at the official endpoint is priced;
+an arbitrary provider named `deepseek` is not evidence of official billing.
 Publish Core 0.1.5 before releasing this adapter dependency.
 
 ## Exports
