@@ -69,6 +69,16 @@ standard ACP tool-call lifecycle. Compaction meaning belongs only in the shared
 `_meta.lody.activity` contract from `acp-extension-core`; manual compaction has a
 `null` Harness turn owner and automatic compaction has a numeric owner.
 
+## Usage accounting
+
+- Count committed `assistant/message.data.usage` once by durable event sequence,
+  never raw usage chunks as well. `request/context` owns the actual model route.
+  Preserve cumulative Core model usage across turns, model switches and compaction.
+- Pinned Harness input already excludes cache hits; DeepSeek output includes
+  reasoning. Split only the latter. Price official routes per request using the
+  event timestamp and the dated UTC peak/off-peak table in `src/usage.ts`.
+  Unknown models, custom endpoints and missing timestamps keep costs unknown.
+
 ## Checks
 
 Run `npm run build`, `npm test`, and `npm run format:check` before publishing a

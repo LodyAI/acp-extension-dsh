@@ -60,6 +60,24 @@ Reconnect and refresh the host's model capabilities after catalog edits.
 local-only model IDs into an endpoint's `/models` response. API credentials remain
 in the host environment; generated compositions contain no credentials.
 
+## Token and USD accounting
+
+Core's usage capability reports committed request usage, cumulative per-model
+totals and already-included deltas. The pinned Harness 0.1.1-rc.2 supplies usage
+on `assistant/message` and actual route metadata on `request/context`; raw stream
+chunks are not counted again. No model request or transcript is needed by tests.
+Only reported activity in the ACP-owned Harness session is counted; separate
+background agents or internal operations without usage events are not invented.
+
+Official [DeepSeek prices](https://api-docs.deepseek.com/quick_start/pricing/),
+checked directly on 2026-09-13, are estimated per request at completion time.
+Off-peak USD/million tokens (cache miss / hit / output): Flash 0.15 / 0.003 / 0.6;
+V4 Pro 0.66 / 0.022 / 1.98. Weekday 01:00–04:00 and 06:00–10:00 UTC are twice
+those rates. `deepseek-v4-flash` and `deepseek-v4-flash-vision-exp` now alias the
+new `deepseek-flash` price. Unknown models/custom endpoints have no estimated cost.
+These are list-price estimates, not invoices; cross-boundary requests can differ.
+Publish Core 0.1.5 before releasing this adapter dependency.
+
 ## Exports
 
 - `acp-extension-dsh` exports the Cordis plugin: `apply`, `inject`, and `name`.

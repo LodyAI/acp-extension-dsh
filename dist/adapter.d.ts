@@ -1,3 +1,4 @@
+import { type HarnessTokenUsage } from './usage.js';
 import { type Stream } from '@agentclientprotocol/sdk';
 export declare const name = "acp-extension-dsh";
 export declare const inject: string[];
@@ -37,7 +38,12 @@ type HarnessTurnEndReason = {
 };
 type HarnessSessionEvent = {
     type: string;
+    seq?: number;
+    time?: number;
     data: {
+        provider?: string;
+        model?: string;
+        usage?: HarnessTokenUsage;
         turn?: number | null;
         reason?: HarnessTurnEndReason;
         chunk?: HarnessStreamChunk;

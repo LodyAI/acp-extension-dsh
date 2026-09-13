@@ -263,8 +263,15 @@ describe('DeepSeek Harness ACP adapter', () => {
       reasoningEffort: 'max',
     });
 
+    let receiveUsage: (value: Record<string, unknown>) => void = () => {};
+    const usageReceived = new Promise<Record<string, unknown>>((resolve) => {
+      receiveUsage = resolve;
+    });
     const client = new ClientSideConnection(
       () => ({
+        extNotification: async (method, params) => {
+          if (method === '_lody/session/usage_update') receiveUsage(params);
+        },
         requestPermission: async () => ({ outcome: { outcome: 'cancelled' as const } }),
         sessionUpdate: async (notification) => {
           sessionUpdates.push(notification as (typeof sessionUpdates)[number]);
@@ -278,10 +285,44 @@ describe('DeepSeek Harness ACP adapter', () => {
     });
     expect(initialized.agentInfo?.name).toBe('acp-extension-dsh');
     expect(initialized.agentCapabilities._meta).toEqual({
-      lody: { compaction: { version: 1 } },
+      lody: { compaction: { version: 1 }, usage: { version: 1 } },
     });
 
     const created = await client.newSession({ cwd: process.cwd(), mcpServers: [] });
+    harnessListeners.get('session/event')?.(createdHarnessSession, {
+      type: 'request/context',
+      seq: 10,
+      time: 0,
+      data: { provider: 'deepseek', model: 'kimi-k3' },
+    });
+    harnessListeners.get('session/event')?.(createdHarnessSession, {
+      type: 'assistant/message',
+      seq: 11,
+      time: 0,
+      data: {
+        turn: 1,
+        step: 1,
+        message: { content: [] },
+        usage: {
+          inputTokens: 100,
+          outputTokens: 50,
+          cacheReadTokens: 30,
+          reasoningTokens: 20,
+        },
+      },
+    });
+    expect(await usageReceived).toMatchObject({
+      sessionId: created.sessionId,
+      modelUsage: {
+        'kimi-k3': {
+          inputTokens: 100,
+          outputTokens: 30,
+          cacheReadInputTokens: 30,
+          reasoningOutputTokens: 20,
+        },
+      },
+      delta: { usage: { inputTokens: 100 } },
+    });
     expect(created.modes?.currentModeId).toBe('workspace-write');
     expect(selectValue(created.configOptions, 'agent_preset')).toBe('standard');
     expect(selectValue(created.configOptions, 'model')).toBe('kimi-k3');

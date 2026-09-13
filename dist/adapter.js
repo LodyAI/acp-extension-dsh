@@ -1,4 +1,5 @@
-import { LODY_PLAN_MODE_CONFIG_ID, createPlanModeConfigOption } from 'acp-extension-core';
+import { LODY_PLAN_MODE_CONFIG_ID, LODY_EXTENSION_METHODS, createPlanModeConfigOption, } from 'acp-extension-core';
+import { HarnessUsageTracker } from './usage.js';
 /**
  * ACP surface for DeepSeek Harness.
  *
@@ -28,6 +29,7 @@ export const inject = [
 ];
 const LODY_CAPABILITIES = {
     compaction: { version: 1 },
+    usage: { version: 1 },
 };
 const MODEL_CONFIG_ID = 'model';
 const MODE_CONFIG_ID = 'mode';
@@ -775,6 +777,14 @@ export function apply(ctx, rawConfig) {
         if (PERMISSION_EVENT_TYPES.has(event.type))
             schedulePermissionSync(record);
         try {
+            if (event.type === 'request/context' && event.data.provider && event.data.model) {
+                record.usage.setRoute(event.data.provider, event.data.model);
+            }
+            if (event.type === 'assistant/message' && event.data.usage && event.seq !== undefined) {
+                const update = record.usage.record(session.id, event.seq, event.time ?? NaN, event.data.usage);
+                if (update)
+                    enqueueOutput(record, () => conn.extNotification(LODY_EXTENSION_METHODS.sessionUsageUpdate, update), record.inflight);
+            }
             if (event.type === 'assistant/chunk' &&
                 event.data.chunk?.type === 'reasoning-delta' &&
                 typeof event.data.chunk.text === 'string' &&
@@ -1077,6 +1087,7 @@ export function apply(ctx, rawConfig) {
                     throw error;
                 }
                 const record = {
+                    usage: new HarnessUsageTracker(!baseUrl || /^https:\/\/api\.deepseek\.com(?:\/v1)?\/?$/.test(baseUrl)),
                     agent: handle.agent,
                     dispose,
                     selection,
