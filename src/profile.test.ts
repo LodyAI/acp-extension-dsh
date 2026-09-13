@@ -5,78 +5,99 @@ import {
   ACP_EXTENSION_DSH_PROFILE_REVISION,
   DEEPSEEK_HARNESS_DEFAULT_SESSION_COMPRESSION,
   DEEPSEEK_HARNESS_NPX_PACKAGES,
+  DEEPSEEK_HARNESS_PROFILE_BUNDLES,
+  DEEPSEEK_HARNESS_PROFILE_NAME,
   DEEPSEEK_HARNESS_VERSION,
-  createDeepSeekHarnessCordisConfig,
+  createDeepSeekHarnessProfileFiles,
 } from './profile.js';
 
+const PRESET_IDS = ['standard', 'ptc', 'minimal', 'cordis'] as const;
+
 describe('DeepSeek Harness profile', () => {
-  it('pins the explicit ACP host and Agent preset package closure', () => {
-    expect(DEEPSEEK_HARNESS_VERSION).toBe('0.1.1-rc.2');
+  it('pins the launcher, base bundle, and same-release package closure', () => {
+    expect(DEEPSEEK_HARNESS_VERSION).toBe('0.1.5-rc.2');
+    expect(DEEPSEEK_HARNESS_PROFILE_NAME).toBe('lody-acp');
+    expect(DEEPSEEK_HARNESS_PROFILE_BUNDLES).toEqual(['@deepseek-ai/dsh-base']);
     expect(new Set(DEEPSEEK_HARNESS_NPX_PACKAGES).size).toBe(DEEPSEEK_HARNESS_NPX_PACKAGES.length);
-    expect(DEEPSEEK_HARNESS_NPX_PACKAGES[0]).toBe('@deepseek-ai/dsh-acp-demo');
+    expect(DEEPSEEK_HARNESS_NPX_PACKAGES[0]).toBe('@deepseek-ai/dsh');
     expect(DEEPSEEK_HARNESS_NPX_PACKAGES).toEqual(
       expect.arrayContaining([
+        '@deepseek-ai/dsh-base',
         '@deepseek-ai/dsh-agent-presets',
-        '@deepseek-ai/dsh-settings-file',
+        '@deepseek-ai/dsh-mcp-client',
         '@deepseek-ai/dsh-agent-tool-presentation',
         '@deepseek-ai/dsh-attachment-local',
-        '@deepseek-ai/dsh-mcp-client',
-        '@deepseek-ai/dsh-tool-cordis',
-        '@deepseek-ai/dsh-tool-pwsh-persistent',
-        '@deepseek-ai/dsh-tool-bash-persistent',
-        '@deepseek-ai/dsh-agent',
-        '@deepseek-ai/dsh-code-runtime',
-        '@deepseek-ai/dsh-llm',
-        '@deepseek-ai/dsh-sandbox-windows-acl',
-        '@deepseek-ai/dsh-scope',
+        '@deepseek-ai/dsh-tool-str-replace-editor',
         '@deepseek-ai/dsh-session',
-        '@deepseek-ai/dsh-system-prompt',
-        '@deepseek-ai/dsh-tools',
       ])
     );
-    expect(DEEPSEEK_HARNESS_NPX_PACKAGES).not.toContain('@deepseek-ai/dsh');
+    expect(DEEPSEEK_HARNESS_NPX_PACKAGES).not.toContain('@deepseek-ai/dsh-acp-demo');
+    expect(DEEPSEEK_HARNESS_NPX_PACKAGES).not.toContain('@deepseek-ai/dsh-agent-spine-demo');
   });
 
-  it('generates a credential-free host composition around the adapter and preset root', () => {
-    const config = createDeepSeekHarnessCordisConfig(
-      '/opt/acp-extension-dsh.js',
-      '/opt/deepseek-agent-presets'
-    );
+  it('generates a credential-free base profile with the Lody overlay', () => {
+    const files = createDeepSeekHarnessProfileFiles({
+      adapterPath: '/opt/acp-extension-dsh.js',
+      presetRoot: '/opt/deepseek-agent-presets',
+    });
 
-    expect(config).toContain("name: '@deepseek-ai/dsh-agent-presets'");
-    expect(config).toContain("- id: settings\n  name: '@deepseek-ai/dsh-settings-file'");
-    expect(config).toContain('default: standard');
-    expect(config).toContain('path: "/opt/deepseek-agent-presets"');
-    expect(config).toContain('openAt: never');
-    expect(config).toContain("name: '@deepseek-ai/dsh-code-runtime-worker-thread'");
-    expect(config).toContain("name: '@deepseek-ai/dsh-attachment-local'");
-    expect(config).not.toContain('ACP_EXTENSION_DSH_MODELS');
-    expect(config).toContain('model: deepseek-v4-pro');
-    expect(config).toContain('name: "/opt/acp-extension-dsh.js"');
-    expect(config).toContain('name: "/opt/acp-extension-dsh.js"\n  inject: [settings]');
-    expect(config).toContain('compression: zstd');
-    expect(config).not.toMatch(/api[_-]?key:\s+[^D\n]/iu);
+    expect(JSON.parse(files.packageJson)).toMatchObject({
+      private: true,
+      dsh: {
+        profile: {
+          bundles: ['@deepseek-ai/dsh-base'],
+          patchReload: 'startup',
+        },
+      },
+    });
+    expect(files.cordisYml).toBe('[]\n');
+    expect(files.pnpmWorkspaceYaml).toContain('nodeLinker: hoisted');
+
+    const patch = files.cordisPatchYml;
+    expect(patch).toContain('- id: session-telemetry-otel\n  disabled: true');
+    expect(patch).toContain('- id: session-title-llm\n  disabled: true');
+    expect(patch).toContain('openAt: never');
+    expect(patch).toContain('compression: zstd');
+    expect(patch).toContain("name: '@deepseek-ai/dsh-agent-presets'");
+    expect(patch).toContain('default: standard');
+    expect(patch).toContain('includeShippedRoot: false');
+    expect(patch).toContain('path: "/opt/deepseek-agent-presets"');
+    expect(patch).toContain('name: "/opt/acp-extension-dsh.js"');
+    expect(patch).toContain('inject: [settings]');
+    expect(patch).toContain('model: "deepseek-flash"');
+    expect(patch).not.toMatch(/api[_-]?key:\s+[^D\n]/iu);
   });
 
   it('invalidates cached probes when the generated profile contract changes', () => {
-    expect(ACP_EXTENSION_DSH_PROFILE_REVISION).toBe('v10');
+    expect(ACP_EXTENSION_DSH_PROFILE_REVISION).toBe('v11');
   });
 
   it('defaults to upstream-compatible zstd and permits a detected legacy raw root', () => {
     expect(DEEPSEEK_HARNESS_DEFAULT_SESSION_COMPRESSION).toBe('zstd');
-    expect(createDeepSeekHarnessCordisConfig('/opt/adapter.js', '/opt/presets')).toContain(
-      'compression: zstd'
-    );
-    expect(createDeepSeekHarnessCordisConfig('/opt/adapter.js', '/opt/presets', 'none')).toContain(
-      'compression: none'
-    );
+    expect(
+      createDeepSeekHarnessProfileFiles({
+        adapterPath: '/opt/adapter.js',
+        presetRoot: '/opt/presets',
+      }).cordisPatchYml
+    ).toContain('compression: zstd');
+    expect(
+      createDeepSeekHarnessProfileFiles({
+        adapterPath: '/opt/adapter.js',
+        presetRoot: '/opt/presets',
+        sessionCompression: 'none',
+      }).cordisPatchYml
+    ).toContain('compression: none');
   });
 
-  it('installs every plugin referenced by the host and shipped Agent presets', async () => {
+  it('installs every package the overlay and shipped Agent presets reference', async () => {
+    const files = createDeepSeekHarnessProfileFiles({
+      adapterPath: '/opt/acp-extension-dsh.js',
+      presetRoot: '/opt/presets',
+    });
     const sources = [
-      createDeepSeekHarnessCordisConfig('/opt/acp-extension-dsh.js', '/opt/presets'),
+      files.cordisPatchYml,
       ...(await Promise.all(
-        ['standard', 'code', 'minimal', 'cordis'].map((presetId) =>
+        PRESET_IDS.map((presetId) =>
           readFile(new URL(`../presets/${presetId}/agent.cordis.yml`, import.meta.url), 'utf8')
         )
       )),

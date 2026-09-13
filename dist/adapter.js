@@ -12,7 +12,7 @@ import { isAbsolute } from 'node:path';
 import { Readable, Writable } from 'node:stream';
 import { AgentSideConnection, ndJsonStream, PROTOCOL_VERSION, RequestError, } from '@agentclientprotocol/sdk';
 import { DEEPSEEK_HARNESS_AGENT_PRESETS, DEEPSEEK_HARNESS_API_KEY_ENV, DEEPSEEK_HARNESS_BASE_URL_ENV, } from './capabilities.js';
-import { ACP_EXTENSION_DSH_VERSION } from './profile.js';
+import { ACP_EXTENSION_DSH_VERSION, DEEPSEEK_HARNESS_DEFAULT_MODEL, DEEPSEEK_HARNESS_PROVIDER, } from './profile.js';
 export const name = 'acp-extension-dsh';
 // Waiting for persistence/query also preserves the upstream composite's
 // startup boundary: ACP cannot accept a session until durability is ready.
@@ -71,8 +71,8 @@ function nonEmptyString(value, fallback) {
     return typeof value === 'string' && value.trim() ? value.trim() : fallback;
 }
 function resolveAdapterConfig(config) {
-    const provider = nonEmptyString(config?.provider, 'deepseek-official');
-    const model = nonEmptyString(config?.model, 'deepseek-v4-pro');
+    const provider = nonEmptyString(config?.provider, DEEPSEEK_HARNESS_PROVIDER);
+    const model = nonEmptyString(config?.model, DEEPSEEK_HARNESS_DEFAULT_MODEL);
     return {
         provider,
         model,
@@ -699,7 +699,7 @@ export function apply(ctx, rawConfig) {
         });
     };
     const refreshPermissionState = (record) => {
-        const permissionMode = ctx.permissionPresets.current(record.agent.session.events);
+        const permissionMode = ctx.permissionPresets.current(record.agent.session);
         if (permissionMode === record.permissionMode)
             return false;
         record.permissionMode = permissionMode;
@@ -762,6 +762,34 @@ export function apply(ctx, rawConfig) {
                 .join('; ')}`);
         }
     };
+    ctx.on('agent/assistant-stream', ({ agent, frame }) => {
+        const record = ownedRecord(agent);
+        if (!record || frame.type !== 'chunk')
+            return;
+        const chunk = frame.chunk;
+        if (!chunk)
+            return;
+        if (chunk.type === 'reasoning-delta' &&
+            typeof chunk.text === 'string' &&
+            chunk.text.length > 0) {
+            enqueueNotification(record, {
+                sessionId: record.agent.session.id,
+                update: {
+                    sessionUpdate: 'agent_thought_chunk',
+                    content: { type: 'text', text: chunk.text },
+                },
+            });
+        }
+        else if (chunk.type === 'block-end' && chunk.block?.type === 'reasoning') {
+            enqueueNotification(record, {
+                sessionId: record.agent.session.id,
+                update: {
+                    sessionUpdate: 'agent_thought_chunk',
+                    content: { type: 'text', text: '\n\n' },
+                },
+            });
+        }
+    });
     ctx.on('session/event', (session, event) => {
         const record = sessions.get(session.header.id);
         if (!record || record.agent.session !== session)
@@ -775,30 +803,7 @@ export function apply(ctx, rawConfig) {
         if (PERMISSION_EVENT_TYPES.has(event.type))
             schedulePermissionSync(record);
         try {
-            if (event.type === 'assistant/chunk' &&
-                event.data.chunk?.type === 'reasoning-delta' &&
-                typeof event.data.chunk.text === 'string' &&
-                event.data.chunk.text.length > 0) {
-                enqueueNotification(record, {
-                    sessionId: record.agent.session.id,
-                    update: {
-                        sessionUpdate: 'agent_thought_chunk',
-                        content: { type: 'text', text: event.data.chunk.text },
-                    },
-                });
-            }
-            else if (event.type === 'assistant/chunk' &&
-                event.data.chunk?.type === 'block-end' &&
-                event.data.chunk.block?.type === 'reasoning') {
-                enqueueNotification(record, {
-                    sessionId: record.agent.session.id,
-                    update: {
-                        sessionUpdate: 'agent_thought_chunk',
-                        content: { type: 'text', text: '\n\n' },
-                    },
-                });
-            }
-            else if (event.type === 'assistant/message') {
+            if (event.type === 'assistant/message') {
                 const inflight = record.inflight?.turn === event.data.turn ? record.inflight : undefined;
                 enqueueOutput(record, async () => {
                     for (const block of event.data.message?.content ?? []) {
@@ -896,7 +901,7 @@ export function apply(ctx, rawConfig) {
             return;
         assertAllowed(modeId, new Set(ctx.permissionPresets.names), 'permission mode');
         ctx.permissionPresets.set(record.agent.session, modeId);
-        const permissionMode = ctx.permissionPresets.current(record.agent.session.events);
+        const permissionMode = ctx.permissionPresets.current(record.agent.session);
         if (permissionMode !== modeId) {
             throw internalError(`permission preset ${JSON.stringify(modeId)} did not become the effective mode`);
         }
@@ -925,10 +930,9 @@ export function apply(ctx, rawConfig) {
                 throw invalidParams('agent preset is fixed after the session has started');
             }
             return ctx.agentPresets
-                .recompose(record.agent.ctx, value)
-                .then((preset) => {
-                record.agent.session.append('agent-preset/selected', { agentPreset: preset.id });
-                record.agentPreset = preset.id;
+                .select(record.agent, value)
+                .then((selectedPreset) => {
+                record.agentPreset = selectedPreset;
                 return { configOptions: configOptions(record) };
             })
                 .catch((error) => {
@@ -1069,7 +1073,7 @@ export function apply(ctx, rawConfig) {
                 let permissionMode;
                 let permissionOptions;
                 try {
-                    permissionMode = ctx.permissionPresets.current(handle.agent.session.events);
+                    permissionMode = ctx.permissionPresets.current(handle.agent.session);
                     permissionOptions = permissionState(ctx, permissionMode);
                 }
                 catch (error) {

@@ -30,15 +30,15 @@ export const DEEPSEEK_HARNESS_AGENT_PRESETS = [
       'Full coding agent with file editing, shell, search, skills, planning, goals, subagents, and workflows.',
   },
   {
-    value: 'code',
+    value: 'ptc',
     name: 'PTC mode',
     description:
-      'Standard capabilities exposed through the Code Mode SDK for multi-step TypeScript programs.',
+      'Full coding agent without the workflow tools; other tools are exposed through the PTC SDK so one TypeScript program composes multi-step work.',
   },
   {
     value: 'minimal',
     name: 'Minimal mode',
-    description: 'Two-tool coding agent with persistent bash and str_replace_editor.',
+    description: 'Single-tool coding agent with a persistent shell.',
   },
   {
     value: 'cordis',

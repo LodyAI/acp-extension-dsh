@@ -17,47 +17,11 @@ type HarnessImageBlock = {
     type: 'image';
     attachment: HarnessImageAttachmentRef;
 };
-type HarnessMessageBlock = HarnessTextBlock | HarnessImageBlock | {
-    type: string;
-};
-type HarnessStreamChunk = {
-    type: string;
-    text?: string;
-    block?: {
-        type: string;
-    };
-};
-type HarnessTurnEndReason = {
-    kind: 'completed' | 'max-tokens' | 'aborted' | 'interrupted' | 'blocked';
-} | {
-    kind: 'error';
-    error: {
-        message: string;
-    };
-};
-type HarnessSessionEvent = {
-    type: string;
-    data: {
-        turn?: number | null;
-        reason?: HarnessTurnEndReason;
-        chunk?: HarnessStreamChunk;
-        message?: {
-            content: HarnessMessageBlock[];
-        };
-        agentPreset?: string;
-        compactionId?: string;
-        error?: string;
-    };
-};
 type HarnessSession = {
     id: string;
     header: {
         id: string;
     };
-    events: readonly HarnessSessionEvent[];
-    append(type: 'agent-preset/selected', data: {
-        agentPreset: string;
-    }): void;
 };
 type HarnessAgent = {
     id: string;
@@ -143,7 +107,7 @@ type HarnessContext = {
     permissionPresets: {
         names: readonly string[];
         defaultPreset: string;
-        current(events: readonly HarnessSessionEvent[]): string;
+        current(session: HarnessSession): string;
         optionOf(name: string): HarnessPermissionOption;
         set(session: HarnessSession, name: string): void;
     };
@@ -151,7 +115,7 @@ type HarnessContext = {
         defaultId: string;
         list(): Promise<HarnessAgentPreset[]>;
         mount(agentContext: HarnessAgentContext, id?: string): Promise<HarnessAgentPreset>;
-        recompose(agentContext: HarnessAgentContext, id: string): Promise<HarnessAgentPreset>;
+        select(agent: HarnessAgent, id: string): Promise<string>;
     };
     logger: {
         warn(message: string): void;

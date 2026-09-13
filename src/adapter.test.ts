@@ -5,7 +5,7 @@ import {
   type SessionConfigOption,
   type Stream,
 } from '@agentclientprotocol/sdk';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { apply } from './adapter.js';
 import { DEEPSEEK_HARNESS_AGENT_PRESETS } from './capabilities.js';
@@ -131,6 +131,13 @@ function selectOption(options: SessionConfigOption[] | null | undefined, id: str
 describe('DeepSeek Harness ACP adapter', () => {
   const disposers: Array<() => Promise<void>> = [];
 
+  beforeEach(() => {
+    // Keep every case independent from an ambient DeepSeek endpoint; cases that
+    // need discovery stub their own values on top of this.
+    vi.stubEnv('DEEPSEEK_BASE_URL', '');
+    vi.stubEnv('DEEPSEEK_API_KEY', '');
+  });
+
   afterEach(async () => {
     await Promise.all(disposers.splice(0).map((dispose) => dispose()));
     vi.unstubAllEnvs();
@@ -237,10 +244,10 @@ describe('DeepSeek Harness ACP adapter', () => {
           { id: 'custom', name: 'Custom preset', description: 'User-provided preset' },
         ],
         mount: async (_agentContext, id = 'standard') => ({ id }),
-        recompose: async (_agentContext, id) => {
+        select: async (_agent, id) => {
           agentPresetSwitches.push(id);
           hasPlanService = id !== 'minimal';
-          return { id };
+          return id;
         },
       },
       logger: { warn: vi.fn() },
@@ -560,7 +567,7 @@ describe('DeepSeek Harness ACP adapter', () => {
         defaultId: 'standard',
         list: async () => [{ id: 'standard' }],
         mount: async (_agentContext, id = 'standard') => ({ id }),
-        recompose: async (_agentContext, id) => ({ id }),
+        select: async (_agent, id) => id,
       },
       logger: { warn: vi.fn() },
       on: () => () => undefined,
@@ -765,7 +772,7 @@ describe('DeepSeek Harness ACP adapter', () => {
         defaultId: 'standard',
         list: async () => [{ id: 'standard' }],
         mount: async (_agentContext, id = 'standard') => ({ id }),
-        recompose: async (_agentContext, id) => ({ id }),
+        select: async (_agent, id) => id,
       },
       logger: { warn: vi.fn() },
       on<TArgs extends unknown[]>(
@@ -958,7 +965,7 @@ describe('DeepSeek Harness ACP adapter', () => {
         defaultId: 'standard',
         list: async () => [{ id: 'standard' }],
         mount: async (_agentContext, id = 'standard') => ({ id }),
-        recompose: async (_agentContext, id) => ({ id }),
+        select: async (_agent, id) => id,
       },
       logger: { warn: vi.fn() },
       on<TArgs extends unknown[]>(
@@ -988,31 +995,37 @@ describe('DeepSeek Harness ACP adapter', () => {
     await client.initialize({ protocolVersion: PROTOCOL_VERSION, clientCapabilities: {} });
     const session = await client.newSession({ cwd: process.cwd(), mcpServers: [] });
     const sessionEvent = globalListeners.get('session/event');
-    if (!createdAgent || !sessionEvent) throw new Error('missing Harness session event listener');
+    const streamEvent = globalListeners.get('agent/assistant-stream');
+    if (!createdAgent || !sessionEvent || !streamEvent) {
+      throw new Error('missing Harness session or assistant-stream listener');
+    }
 
-    sessionEvent(createdAgent.session, {
-      type: 'assistant/chunk',
-      data: { chunk: { type: 'reasoning-delta', text: 'First thought. ' } },
+    streamEvent({
+      agent: createdAgent,
+      frame: { type: 'chunk', chunk: { type: 'reasoning-delta', text: 'First thought. ' } },
     });
-    sessionEvent(createdAgent.session, {
-      type: 'assistant/chunk',
-      data: { chunk: { type: 'reasoning-delta', text: '' } },
+    streamEvent({
+      agent: createdAgent,
+      frame: { type: 'chunk', chunk: { type: 'reasoning-delta', text: '' } },
     });
-    sessionEvent(createdAgent.session, {
-      type: 'assistant/chunk',
-      data: { chunk: { type: 'reasoning-delta', text: 'Second thought.' } },
+    streamEvent({
+      agent: createdAgent,
+      frame: { type: 'chunk', chunk: { type: 'reasoning-delta', text: 'Second thought.' } },
     });
-    sessionEvent(createdAgent.session, {
-      type: 'assistant/chunk',
-      data: { chunk: { type: 'text-delta', text: 'not forwarded before the final message' } },
+    streamEvent({
+      agent: createdAgent,
+      frame: {
+        type: 'chunk',
+        chunk: { type: 'text-delta', text: 'not forwarded before the final message' },
+      },
     });
-    sessionEvent(createdAgent.session, {
-      type: 'assistant/chunk',
-      data: { chunk: { type: 'block-end', block: { type: 'reasoning' } } },
+    streamEvent({
+      agent: createdAgent,
+      frame: { type: 'chunk', chunk: { type: 'block-end', block: { type: 'reasoning' } } },
     });
-    sessionEvent(createdAgent.session, {
-      type: 'assistant/chunk',
-      data: { chunk: { type: 'block-end', block: { type: 'text' } } },
+    streamEvent({
+      agent: createdAgent,
+      frame: { type: 'chunk', chunk: { type: 'block-end', block: { type: 'text' } } },
     });
     sessionEvent(createdAgent.session, {
       type: 'assistant/message',
@@ -1193,7 +1206,7 @@ describe('DeepSeek Harness ACP adapter', () => {
         defaultId: 'standard',
         list: async () => [{ id: 'standard' }],
         mount: async (_agentContext, id = 'standard') => ({ id }),
-        recompose: async (_agentContext, id) => ({ id }),
+        select: async (_agent, id) => id,
       },
       logger: { warn: vi.fn() },
       on: () => () => undefined,
@@ -1293,7 +1306,7 @@ describe('DeepSeek Harness ACP adapter', () => {
         defaultId: 'standard',
         list: async () => [{ id: 'standard' }, { id: 'minimal' }],
         mount: async (_agentContext, id = 'standard') => ({ id }),
-        recompose: async (_agentContext, id) => ({ id }),
+        select: async (_agent, id) => id,
       },
       logger: { warn: vi.fn() },
       on<TArgs extends unknown[]>(

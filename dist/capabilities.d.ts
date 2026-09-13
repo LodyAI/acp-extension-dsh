@@ -21,13 +21,13 @@ export declare const DEEPSEEK_HARNESS_AGENT_PRESETS: readonly [{
     readonly name: "Standard mode";
     readonly description: "Full coding agent with file editing, shell, search, skills, planning, goals, subagents, and workflows.";
 }, {
-    readonly value: "code";
+    readonly value: "ptc";
     readonly name: "PTC mode";
-    readonly description: "Standard capabilities exposed through the Code Mode SDK for multi-step TypeScript programs.";
+    readonly description: "Full coding agent without the workflow tools; other tools are exposed through the PTC SDK so one TypeScript program composes multi-step work.";
 }, {
     readonly value: "minimal";
     readonly name: "Minimal mode";
-    readonly description: "Two-tool coding agent with persistent bash and str_replace_editor.";
+    readonly description: "Single-tool coding agent with a persistent shell.";
 }, {
     readonly value: "cordis";
     readonly name: "Creator mode";
