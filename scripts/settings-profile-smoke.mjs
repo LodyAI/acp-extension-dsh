@@ -108,7 +108,14 @@ for (const fixture of cases) {
         const model = session.configOptions.find((option) => option.id === 'model');
         const ids = model.options.map((option) => option.value);
         assert.ok(ids.includes(fixture.expectedModel), JSON.stringify(ids));
-        if (fixture.settings) assert.ok(!ids.includes('deepseek-flash'));
+        if (fixture.settings) {
+          // The settings document replaces the Harness catalog, so the shipped
+          // defaults disappear. The profile-configured model stays visible on
+          // purpose: the catalog is advisory, so an unlisted configured route
+          // must remain selectable.
+          assert.ok(!ids.includes('deepseek-v4-pro'), JSON.stringify(ids));
+          assert.ok(ids.includes('deepseek-flash'), JSON.stringify(ids));
+        }
       }
       if (fixture.settings !== undefined) {
         assert.equal(await readFile(settingsPath, 'utf8'), fixture.settings);
