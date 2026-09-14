@@ -3,13 +3,19 @@ import { describe, expect, it } from 'vitest';
 
 import {
   ACP_EXTENSION_DSH_PROFILE_REVISION,
+  DEEPSEEK_HARNESS_CORDIS_PACKAGE_VERSIONS,
   DEEPSEEK_HARNESS_DEFAULT_SESSION_COMPRESSION,
   DEEPSEEK_HARNESS_NPX_PACKAGES,
   DEEPSEEK_HARNESS_PROFILE_BUNDLES,
   DEEPSEEK_HARNESS_PROFILE_NAME,
   DEEPSEEK_HARNESS_VERSION,
+  createDeepSeekHarnessNpxSpecifiers,
   createDeepSeekHarnessProfileFiles,
 } from './profile.js';
+import {
+  DEEPSEEK_HARNESS_DEFAULT_PERMISSION_PRESET,
+  DEEPSEEK_HARNESS_PERMISSION_PRESETS,
+} from './capabilities.js';
 
 const PRESET_IDS = ['standard', 'ptc', 'minimal', 'cordis'] as const;
 
@@ -35,6 +41,37 @@ describe('DeepSeek Harness profile', () => {
     expect(DEEPSEEK_HARNESS_NPX_PACKAGES).not.toContain('@deepseek-ai/dsh-agent-spine-demo');
   });
 
+  it('pins the Cordis ecosystem at its own releases instead of the Harness release', () => {
+    const specifiers = createDeepSeekHarnessNpxSpecifiers();
+
+    expect(specifiers).toHaveLength(DEEPSEEK_HARNESS_NPX_PACKAGES.length);
+    expect(specifiers).toEqual(
+      expect.arrayContaining([
+        '@deepseek-ai/cordis@4.0.2',
+        '@deepseek-ai/cordis-plugin-group@1.0.2',
+        '@deepseek-ai/cordis-plugin-hmr@1.0.17',
+        '@deepseek-ai/cordis-plugin-include@1.0.7',
+        '@deepseek-ai/cordis-plugin-loader@1.0.3',
+        '@deepseek-ai/cordis-plugin-timer@1.1.4',
+      ])
+    );
+    // No Cordis package publishes a `DEEPSEEK_HARNESS_VERSION` release, so a
+    // specifier built from it fails the cold install with ETARGET.
+    for (const name of Object.keys(DEEPSEEK_HARNESS_CORDIS_PACKAGE_VERSIONS)) {
+      expect(DEEPSEEK_HARNESS_NPX_PACKAGES).toContain(name);
+      expect(specifiers).not.toContain(`${name}@${DEEPSEEK_HARNESS_VERSION}`);
+    }
+    for (const specifier of specifiers) {
+      const separator = specifier.lastIndexOf('@');
+      const name = specifier.slice(0, separator);
+      const version = specifier.slice(separator + 1);
+      expect(DEEPSEEK_HARNESS_NPX_PACKAGES).toContain(name);
+      expect(version).toBe(
+        DEEPSEEK_HARNESS_CORDIS_PACKAGE_VERSIONS[name] ?? DEEPSEEK_HARNESS_VERSION
+      );
+    }
+  });
+
   it('generates a credential-free base profile with the Lody overlay', () => {
     const files = createDeepSeekHarnessProfileFiles({
       adapterPath: '/opt/acp-extension-dsh.js',
@@ -58,6 +95,18 @@ describe('DeepSeek Harness profile', () => {
     expect(patch).toContain('- id: session-title-llm\n  disabled: true');
     expect(patch).toContain('openAt: never');
     expect(patch).toContain('compression: zstd');
+    // The permission block is rendered from the shared vocabulary, so the
+    // selector labels and the enforced presets cannot drift apart.
+    expect(patch).toContain(`defaultPreset: ${DEEPSEEK_HARNESS_DEFAULT_PERMISSION_PRESET}`);
+    for (const preset of DEEPSEEK_HARNESS_PERMISSION_PRESETS) {
+      expect(patch).toContain(
+        `      ${preset.id}:\n` +
+          `        sandbox: ${preset.sandbox}\n` +
+          `        approval: ${preset.approval}\n` +
+          `        name: ${preset.name}\n` +
+          `        description: ${preset.description}`
+      );
+    }
     expect(patch).toContain("name: '@deepseek-ai/dsh-agent-presets'");
     expect(patch).toContain('default: standard');
     expect(patch).toContain('includeShippedRoot: false');

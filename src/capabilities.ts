@@ -1,21 +1,41 @@
-/** Stable ACP selector vocabulary backed by the composed DeepSeek Harness profile. */
-export const DEEPSEEK_HARNESS_PERMISSION_MODES = [
+/**
+ * Permission vocabulary shared by the ACP selector and the generated Harness
+ * profile. `id`/`name`/`description` are the client-facing labels a host
+ * renders; `sandbox`/`approval` are the Harness preset the profile writes into
+ * `cordis.patch.yml`. Both halves live here so the selector a host shows and
+ * the preset Harness enforces cannot drift apart.
+ */
+export const DEEPSEEK_HARNESS_PERMISSION_PRESETS = [
   {
     id: 'read-only',
     name: 'Read-only',
     description: 'Read inside the workspace; protected writes require one-time approval.',
+    sandbox: 'read-only',
+    approval: 'ask',
   },
   {
     id: 'workspace-write',
     name: 'Workspace write',
     description: 'Read and write inside the workspace; wider access requires one-time approval.',
+    sandbox: 'workspace-write',
+    approval: 'ask',
   },
   {
     id: 'danger-full-access',
     name: 'Full access',
     description: 'Allow unrestricted file and command access without approval prompts.',
+    sandbox: 'danger-full-access',
+    approval: 'never',
   },
 ] as const;
+
+/** Permission preset a fresh session starts on. Must name one of the presets above. */
+export const DEEPSEEK_HARNESS_DEFAULT_PERMISSION_PRESET = 'workspace-write';
+
+/** Stable ACP selector vocabulary backed by the composed DeepSeek Harness profile. */
+export const DEEPSEEK_HARNESS_PERMISSION_MODES = DEEPSEEK_HARNESS_PERMISSION_PRESETS.map(
+  ({ id, name, description }) => ({ id, name, description })
+);
 
 /** Upstream DeepSeek connection settings consumed by the provider and ACP discovery. */
 export const DEEPSEEK_HARNESS_API_KEY_ENV = 'DEEPSEEK_API_KEY';

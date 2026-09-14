@@ -47,7 +47,13 @@ Harness. Keep it usable without importing Lody packages.
   and public Node builds do not reliably include SQLite FTS5.
   The `0.1.5-rc.2` package family cold-installs under npm 10 with the complete
   same-version closure. Keep the closure exact and do not add `--force` or
-  `--legacy-peer-deps`; either would hide a future peer-graph regression.
+  `--legacy-peer-deps`; either would hide a future peer-graph regression. The
+  Cordis-ecosystem entries in `DEEPSEEK_HARNESS_CORDIS_PACKAGE_VERSIONS` are the
+  exception: they publish on their own release lines, so the launcher must
+  install them from `createDeepSeekHarnessNpxSpecifiers()` instead of appending
+  `DEEPSEEK_HARNESS_VERSION`. Requesting one at the Harness release fails the
+  cold install with `ETARGET`, so never "simplify" the closure back to a single
+  version.
 - `src/capabilities.ts` metadata is authoritative for built-in preset labels exposed
   through ACP. Harness runtime metadata remains authoritative for user presets.
 - Hosts own installation caches, data-directory selection, process supervision,

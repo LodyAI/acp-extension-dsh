@@ -9,6 +9,11 @@
  * upstream base composition without inheriting the web product surface.
  */
 
+import {
+  DEEPSEEK_HARNESS_DEFAULT_PERMISSION_PRESET,
+  DEEPSEEK_HARNESS_PERMISSION_PRESETS,
+} from './capabilities.js';
+
 export const ACP_EXTENSION_DSH_VERSION = '0.2.0';
 export const DEEPSEEK_HARNESS_VERSION = '0.1.5-rc.2';
 export const ACP_EXTENSION_DSH_PROFILE_REVISION = 'v11';
@@ -274,6 +279,37 @@ export const DEEPSEEK_HARNESS_NPX_PACKAGES = [
   '@deepseek-ai/dsh-workspace',
 ] as const;
 
+/**
+ * Cordis-ecosystem packages version independently of the Harness family: the
+ * `0.1.5-rc.2` packages peer on `@deepseek-ai/cordis@^4.0.2`,
+ * `@deepseek-ai/cordis-plugin-hmr@^1.0.17`, and so on, and none of them
+ * publishes a `0.1.5-rc.2` release. Requesting one at
+ * `DEEPSEEK_HARNESS_VERSION` fails the cold install outright with `ETARGET`,
+ * so the launcher installs these exact releases instead. Every key must name a
+ * package already listed in `DEEPSEEK_HARNESS_NPX_PACKAGES`.
+ */
+export const DEEPSEEK_HARNESS_CORDIS_PACKAGE_VERSIONS: Readonly<Record<string, string>> = {
+  '@deepseek-ai/cordis': '4.0.2',
+  '@deepseek-ai/cordis-plugin-group': '1.0.2',
+  '@deepseek-ai/cordis-plugin-hmr': '1.0.17',
+  '@deepseek-ai/cordis-plugin-include': '1.0.7',
+  '@deepseek-ai/cordis-plugin-loader': '1.0.3',
+  '@deepseek-ai/cordis-plugin-timer': '1.1.4',
+};
+
+/**
+ * Exact `name@version` specifiers the launcher installs: Harness-family
+ * packages take `DEEPSEEK_HARNESS_VERSION`, the Cordis-ecosystem exceptions
+ * take their own release.
+ */
+export function createDeepSeekHarnessNpxSpecifiers(
+  versions: Readonly<Record<string, string>> = DEEPSEEK_HARNESS_CORDIS_PACKAGE_VERSIONS
+): string[] {
+  return DEEPSEEK_HARNESS_NPX_PACKAGES.map(
+    (packageName) => `${packageName}@${versions[packageName] ?? DEEPSEEK_HARNESS_VERSION}`
+  );
+}
+
 /** Generated files written into the profile directory before launch. */
 export type DeepSeekHarnessProfileFiles = {
   packageJson: string;
@@ -304,6 +340,16 @@ export function createDeepSeekHarnessProfileFiles(
   const compression = config.sessionCompression ?? DEEPSEEK_HARNESS_DEFAULT_SESSION_COMPRESSION;
   const adapterPath = JSON.stringify(config.adapterPath);
   const presetRoot = JSON.stringify(config.presetRoot);
+  // Rendered from the shared permission vocabulary so the labels a host shows
+  // in the ACP selector and the presets Harness enforces are the same text.
+  const permissionPresets = DEEPSEEK_HARNESS_PERMISSION_PRESETS.map(
+    (preset) =>
+      `      ${preset.id}:\n` +
+      `        sandbox: ${preset.sandbox}\n` +
+      `        approval: ${preset.approval}\n` +
+      `        name: ${preset.name}\n` +
+      `        description: ${preset.description}`
+  ).join('\n');
 
   const packageJson =
     JSON.stringify(
@@ -361,23 +407,9 @@ export function createDeepSeekHarnessProfileFiles(
 # Preserve the product's three permission modes with client-facing labels.
 - id: permission
   config:
-    defaultPreset: workspace-write
+    defaultPreset: ${DEEPSEEK_HARNESS_DEFAULT_PERMISSION_PRESET}
     presets:
-      read-only:
-        sandbox: read-only
-        approval: ask
-        name: Read-only
-        description: Read inside the workspace; protected writes require one-time approval.
-      workspace-write:
-        sandbox: workspace-write
-        approval: ask
-        name: Workspace write
-        description: Read and write inside the workspace; wider access requires one-time approval.
-      danger-full-access:
-        sandbox: danger-full-access
-        approval: never
-        name: Full access
-        description: Allow unrestricted file and command access without approval prompts.
+${permissionPresets}
 
 - insert:
     - id: agent-presets

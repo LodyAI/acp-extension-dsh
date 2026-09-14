@@ -105,8 +105,8 @@ npm run format:check
 Node.js 22 or newer is required.
 
 The optional real-runtime settings regression test uses a preinstalled profile
-closure. Install every package in `DEEPSEEK_HARNESS_NPX_PACKAGES` at
-`DEEPSEEK_HARNESS_VERSION` in a separate directory first, then run:
+closure. Install every specifier `createDeepSeekHarnessNpxSpecifiers()` returns
+in a separate directory first, then run:
 
 ```sh
 DSH_TEST_RUNTIME_ROOT=/absolute/runtime/node_modules npm run test:settings-profile
