@@ -43,7 +43,11 @@ import {
   DEEPSEEK_HARNESS_API_KEY_ENV,
   DEEPSEEK_HARNESS_BASE_URL_ENV,
 } from './capabilities.js';
-import { ACP_EXTENSION_DSH_VERSION } from './profile.js';
+import {
+  ACP_EXTENSION_DSH_VERSION,
+  DEEPSEEK_HARNESS_DEFAULT_MODEL,
+  DEEPSEEK_HARNESS_PROVIDER,
+} from './profile.js';
 
 export const name = 'acp-extension-dsh';
 // Waiting for persistence/query also preserves the upstream composite's
@@ -99,6 +103,11 @@ type HarnessStreamChunk = {
   text?: string;
   block?: { type: string };
 };
+/** One transient `agent/assistant-stream` publication from the Harness agent loop. */
+type HarnessAssistantStreamFrame = {
+  type: string;
+  chunk?: HarnessStreamChunk;
+};
 
 type HarnessTurnEndReason =
   | { kind: 'completed' | 'max-tokens' | 'aborted' | 'interrupted' | 'blocked' }
@@ -109,9 +118,7 @@ type HarnessSessionEvent = {
   data: {
     turn?: number | null;
     reason?: HarnessTurnEndReason;
-    chunk?: HarnessStreamChunk;
     message?: { content: HarnessMessageBlock[] };
-    agentPreset?: string;
     compactionId?: string;
     error?: string;
   };
@@ -124,8 +131,6 @@ const LODY_CAPABILITIES = {
 type HarnessSession = {
   id: string;
   header: { id: string };
-  events: readonly HarnessSessionEvent[];
-  append(type: 'agent-preset/selected', data: { agentPreset: string }): void;
 };
 
 type HarnessAgent = {
@@ -260,7 +265,7 @@ type HarnessContext = {
   permissionPresets: {
     names: readonly string[];
     defaultPreset: string;
-    current(events: readonly HarnessSessionEvent[]): string;
+    current(session: HarnessSession): string;
     optionOf(name: string): HarnessPermissionOption;
     set(session: HarnessSession, name: string): void;
   };
@@ -268,7 +273,7 @@ type HarnessContext = {
     defaultId: string;
     list(): Promise<HarnessAgentPreset[]>;
     mount(agentContext: HarnessAgentContext, id?: string): Promise<HarnessAgentPreset>;
-    recompose(agentContext: HarnessAgentContext, id: string): Promise<HarnessAgentPreset>;
+    select(agent: HarnessAgent, id: string): Promise<string>;
   };
   logger: {
     warn(message: string): void;
@@ -384,8 +389,8 @@ function nonEmptyString(value: unknown, fallback: string): string {
 }
 
 function resolveAdapterConfig(config: DeepSeekAcpAdapterConfig | undefined): ResolvedAdapterConfig {
-  const provider = nonEmptyString(config?.provider, 'deepseek-official');
-  const model = nonEmptyString(config?.model, 'deepseek-v4-pro');
+  const provider = nonEmptyString(config?.provider, DEEPSEEK_HARNESS_PROVIDER);
+  const model = nonEmptyString(config?.model, DEEPSEEK_HARNESS_DEFAULT_MODEL);
   return {
     provider,
     model,
@@ -1120,7 +1125,7 @@ export function apply(ctx: HarnessContext, rawConfig?: DeepSeekAcpAdapterConfig)
   };
 
   const refreshPermissionState = (record: SessionRecord): boolean => {
-    const permissionMode = ctx.permissionPresets.current(record.agent.session.events);
+    const permissionMode = ctx.permissionPresets.current(record.agent.session);
     if (permissionMode === record.permissionMode) return false;
     record.permissionMode = permissionMode;
     record.permissionOptions = permissionState(ctx, permissionMode);
@@ -1189,6 +1194,37 @@ export function apply(ctx: HarnessContext, rawConfig?: DeepSeekAcpAdapterConfig)
     }
   };
 
+  ctx.on(
+    'agent/assistant-stream',
+    ({ agent, frame }: { agent: HarnessAgent; frame: HarnessAssistantStreamFrame }) => {
+      const record = ownedRecord(agent);
+      if (!record || frame.type !== 'chunk') return;
+      const chunk = frame.chunk;
+      if (!chunk) return;
+      if (
+        chunk.type === 'reasoning-delta' &&
+        typeof chunk.text === 'string' &&
+        chunk.text.length > 0
+      ) {
+        enqueueNotification(record, {
+          sessionId: record.agent.session.id,
+          update: {
+            sessionUpdate: 'agent_thought_chunk',
+            content: { type: 'text', text: chunk.text },
+          },
+        });
+      } else if (chunk.type === 'block-end' && chunk.block?.type === 'reasoning') {
+        enqueueNotification(record, {
+          sessionId: record.agent.session.id,
+          update: {
+            sessionUpdate: 'agent_thought_chunk',
+            content: { type: 'text', text: '\n\n' },
+          },
+        });
+      }
+    }
+  );
+
   ctx.on('session/event', (session: HarnessSession, event: HarnessSessionEvent) => {
     const record = sessions.get(session.header.id);
     if (!record || record.agent.session !== session) return;
@@ -1200,32 +1236,7 @@ export function apply(ctx: HarnessContext, rawConfig?: DeepSeekAcpAdapterConfig)
     }
     if (PERMISSION_EVENT_TYPES.has(event.type)) schedulePermissionSync(record);
     try {
-      if (
-        event.type === 'assistant/chunk' &&
-        event.data.chunk?.type === 'reasoning-delta' &&
-        typeof event.data.chunk.text === 'string' &&
-        event.data.chunk.text.length > 0
-      ) {
-        enqueueNotification(record, {
-          sessionId: record.agent.session.id,
-          update: {
-            sessionUpdate: 'agent_thought_chunk',
-            content: { type: 'text', text: event.data.chunk.text },
-          },
-        });
-      } else if (
-        event.type === 'assistant/chunk' &&
-        event.data.chunk?.type === 'block-end' &&
-        event.data.chunk.block?.type === 'reasoning'
-      ) {
-        enqueueNotification(record, {
-          sessionId: record.agent.session.id,
-          update: {
-            sessionUpdate: 'agent_thought_chunk',
-            content: { type: 'text', text: '\n\n' },
-          },
-        });
-      } else if (event.type === 'assistant/message') {
+      if (event.type === 'assistant/message') {
         const inflight = record.inflight?.turn === event.data.turn ? record.inflight : undefined;
         enqueueOutput(
           record,
@@ -1336,7 +1347,7 @@ export function apply(ctx: HarnessContext, rawConfig?: DeepSeekAcpAdapterConfig)
     if (modeId === record.permissionMode) return;
     assertAllowed(modeId, new Set(ctx.permissionPresets.names), 'permission mode');
     ctx.permissionPresets.set(record.agent.session, modeId);
-    const permissionMode = ctx.permissionPresets.current(record.agent.session.events);
+    const permissionMode = ctx.permissionPresets.current(record.agent.session);
     if (permissionMode !== modeId) {
       throw internalError(
         `permission preset ${JSON.stringify(modeId)} did not become the effective mode`
@@ -1369,10 +1380,9 @@ export function apply(ctx: HarnessContext, rawConfig?: DeepSeekAcpAdapterConfig)
         throw invalidParams('agent preset is fixed after the session has started');
       }
       return ctx.agentPresets
-        .recompose(record.agent.ctx, value)
-        .then((preset) => {
-          record.agent.session.append('agent-preset/selected', { agentPreset: preset.id });
-          record.agentPreset = preset.id;
+        .select(record.agent, value)
+        .then((selectedPreset) => {
+          record.agentPreset = selectedPreset;
           return { configOptions: configOptions(record) };
         })
         .catch((error: unknown) => {
@@ -1527,7 +1537,7 @@ export function apply(ctx: HarnessContext, rawConfig?: DeepSeekAcpAdapterConfig)
         let permissionMode: string;
         let permissionOptions: HarnessPermissionOption[];
         try {
-          permissionMode = ctx.permissionPresets.current(handle.agent.session.events);
+          permissionMode = ctx.permissionPresets.current(handle.agent.session);
           permissionOptions = permissionState(ctx, permissionMode);
         } catch (error: unknown) {
           await dispose();

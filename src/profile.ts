@@ -1,313 +1,449 @@
-export const ACP_EXTENSION_DSH_VERSION = '0.1.2';
-export const DEEPSEEK_HARNESS_VERSION = '0.1.1-rc.2';
-export const ACP_EXTENSION_DSH_PROFILE_REVISION = 'v10';
+/**
+ * DeepSeek Harness composition contract for the Lody ACP host.
+ *
+ * Lody runs the DeepSeek Harness profile/bundle launcher: `dsh --profile <name>`
+ * composes the pinned `@deepseek-ai/dsh-base` bundle under
+ * `$DSH_HOME/profiles/<name>` and then applies the generated
+ * `cordis.patch.yml` overlay. That overlay removes product/telemetry rows and
+ * mounts this package's adapter as the ACP entry point, so the host keeps the
+ * upstream base composition without inheriting the web product surface.
+ */
+
+import {
+  DEEPSEEK_HARNESS_DEFAULT_PERMISSION_PRESET,
+  DEEPSEEK_HARNESS_PERMISSION_PRESETS,
+} from './capabilities.js';
+
+export const ACP_EXTENSION_DSH_VERSION = '0.2.0';
+export const DEEPSEEK_HARNESS_VERSION = '0.1.5-rc.2';
+export const ACP_EXTENSION_DSH_PROFILE_REVISION = 'v11';
 export const ACP_EXTENSION_DSH_SESSION_ROOT_ENV = 'ACP_EXTENSION_DSH_SESSION_ROOT';
 export const ACP_EXTENSION_DSH_QUERY_PATH_ENV = 'ACP_EXTENSION_DSH_QUERY_PATH';
 export const DEEPSEEK_HARNESS_DEFAULT_SESSION_COMPRESSION = 'zstd';
+
+/** Profile directory name resolved under `$DSH_HOME/profiles`. */
+export const DEEPSEEK_HARNESS_PROFILE_NAME = 'lody-acp';
+/** Bundle layers the generated profile composes, in order. */
+export const DEEPSEEK_HARNESS_PROFILE_BUNDLES = ['@deepseek-ai/dsh-base'] as const;
+/** Provider route and default model pinned for new sessions. */
+export const DEEPSEEK_HARNESS_PROVIDER = 'deepseek-official';
+export const DEEPSEEK_HARNESS_DEFAULT_MODEL = 'deepseek-flash';
 
 export type DeepSeekHarnessSessionCompression = 'zstd' | 'none';
 
 export const ACP_EXTENSION_DSH_CAPABILITY_SOURCE_VERSION = `acp-extension-dsh@${ACP_EXTENSION_DSH_VERSION}:dsh@${DEEPSEEK_HARNESS_VERSION}:profile-${ACP_EXTENSION_DSH_PROFILE_REVISION}`;
 
-// Keep the ACP entry package first. Hosts use its binary to launch the explicit
-// composition below. The official all-in-one product CLI is deliberately not
-// installed: this ACP host owns a smaller immutable composition and must not
-// inherit product UI or telemetry packages. Every package used by the host plane
-// or one of the four shipped Agent presets is pinned to the same Harness release.
+/**
+ * Exact same-version package closure for the launcher install. The Harness
+ * packages publish caret ranges, so every package the composed profile or a
+ * shipped Agent preset can resolve is named here with the same release; the
+ * first entry owns the `dsh` binary.
+ */
 export const DEEPSEEK_HARNESS_NPX_PACKAGES = [
-  '@deepseek-ai/dsh-acp-demo',
-  '@deepseek-ai/dsh-settings-file',
-  '@deepseek-ai/dsh-agent-spine-demo',
-  '@deepseek-ai/dsh-session-persistence-jsonl',
-  '@deepseek-ai/dsh-session-checkpoint-policy',
-  '@deepseek-ai/dsh-session-query-sqlite',
-  '@deepseek-ai/dsh-attachment-local',
-  '@deepseek-ai/dsh-llm-deepseek',
-  '@deepseek-ai/dsh-sandbox-local',
-  '@deepseek-ai/dsh-sandbox-policy',
-  '@deepseek-ai/dsh-subprocess-local',
-  '@deepseek-ai/dsh-bash-sandbox',
-  '@deepseek-ai/dsh-pwsh-sandbox',
-  '@deepseek-ai/dsh-user-approval',
-  '@deepseek-ai/dsh-permission-presets',
-  '@deepseek-ai/dsh-token-meter',
-  '@deepseek-ai/dsh-fs-sandbox',
-  '@deepseek-ai/dsh-fs-observation-policy',
-  '@deepseek-ai/dsh-shell-env',
-  '@deepseek-ai/dsh-commands',
-  '@deepseek-ai/dsh-skill',
-  '@deepseek-ai/dsh-goal',
-  '@deepseek-ai/dsh-goal-round-driver',
-  '@deepseek-ai/dsh-user-questions',
-  '@deepseek-ai/dsh-session-projection',
-  '@deepseek-ai/dsh-subagent',
-  '@deepseek-ai/dsh-subagent-spawn-in-process',
-  '@deepseek-ai/dsh-subagent-fork-in-process',
-  '@deepseek-ai/dsh-tool-subagent-report',
-  '@deepseek-ai/dsh-web',
-  '@deepseek-ai/dsh-web-search-deepseek',
-  '@deepseek-ai/dsh-code-runtime-worker-thread',
-  '@deepseek-ai/dsh-cordis-host-runner',
-  '@deepseek-ai/dsh-agent-presets',
-  '@deepseek-ai/dsh-mcp-client',
-  '@deepseek-ai/dsh-persona',
-  '@deepseek-ai/dsh-agent-instructions',
-  '@deepseek-ai/dsh-tool-bash',
-  '@deepseek-ai/dsh-tool-pwsh',
-  '@deepseek-ai/dsh-tool-fs',
-  '@deepseek-ai/dsh-tool-fs-search',
-  '@deepseek-ai/dsh-tool-jobs',
-  '@deepseek-ai/dsh-tool-goal',
-  '@deepseek-ai/dsh-plan-mode',
-  '@deepseek-ai/dsh-compaction-basic',
-  '@deepseek-ai/dsh-command-compact',
-  '@deepseek-ai/dsh-compaction-tool-result-pruner',
-  '@deepseek-ai/dsh-tool-subagent-control',
-  '@deepseek-ai/dsh-tool-subagent',
-  '@deepseek-ai/dsh-workflow-worker-thread',
-  '@deepseek-ai/dsh-tool-workflow',
-  '@deepseek-ai/dsh-tool-ralph',
-  '@deepseek-ai/dsh-tool-ask-user',
-  '@deepseek-ai/dsh-tool-todo',
-  '@deepseek-ai/dsh-tool-web',
-  '@deepseek-ai/dsh-skill-filesystem',
-  '@deepseek-ai/dsh-tool-skill',
-  '@deepseek-ai/dsh-agent-tool-presentation',
-  '@deepseek-ai/dsh-tool-cordis',
-  '@deepseek-ai/dsh-terminal',
-  '@deepseek-ai/dsh-terminal-bash',
-  '@deepseek-ai/dsh-tool-bash-persistent',
-  '@deepseek-ai/dsh-tool-pwsh-persistent',
-  '@deepseek-ai/dsh-fs-local',
-  '@deepseek-ai/dsh-tool-str-replace-editor',
-
-  // Pin the complete transitive DSH dependency and peer closure too. Harness
-  // packages publish caret ranges, so leaving one implicit lets npm mix a later
-  // release candidate into this otherwise immutable composition when published.
+  '@deepseek-ai/dsh',
+  '@deepseek-ai/cordis',
+  '@deepseek-ai/cordis-plugin-group',
+  '@deepseek-ai/cordis-plugin-hmr',
+  '@deepseek-ai/cordis-plugin-include',
+  '@deepseek-ai/cordis-plugin-loader',
+  '@deepseek-ai/cordis-plugin-timer',
   '@deepseek-ai/dsh-acp',
+  '@deepseek-ai/dsh-acp-app',
   '@deepseek-ai/dsh-agent',
+  '@deepseek-ai/dsh-agent-default-model',
+  '@deepseek-ai/dsh-agent-instructions',
   '@deepseek-ai/dsh-agent-loop',
+  '@deepseek-ai/dsh-agent-presets',
+  '@deepseek-ai/dsh-agent-tool-presentation',
   '@deepseek-ai/dsh-anonymous-user-id',
+  '@deepseek-ai/dsh-api-gateway',
+  '@deepseek-ai/dsh-api-remotes',
+  '@deepseek-ai/dsh-api-session-controller',
+  '@deepseek-ai/dsh-api-settings-controller',
+  '@deepseek-ai/dsh-api-workspace-controller',
+  '@deepseek-ai/dsh-api-workspace-files',
   '@deepseek-ai/dsh-app-boot',
   '@deepseek-ai/dsh-atomic-write',
   '@deepseek-ai/dsh-attachment',
+  '@deepseek-ai/dsh-attachment-local',
+  '@deepseek-ai/dsh-authorization',
+  '@deepseek-ai/dsh-base',
   '@deepseek-ai/dsh-bash-local',
+  '@deepseek-ai/dsh-bash-sandbox',
   '@deepseek-ai/dsh-brand',
+  '@deepseek-ai/dsh-chunked-list',
+  '@deepseek-ai/dsh-client-connection',
+  '@deepseek-ai/dsh-client-file-upload',
+  '@deepseek-ai/dsh-client-hmr',
+  '@deepseek-ai/dsh-client-locale',
+  '@deepseek-ai/dsh-client-modules',
+  '@deepseek-ai/dsh-client-resources',
+  '@deepseek-ai/dsh-client-ui-agent-preset',
+  '@deepseek-ai/dsh-client-ui-approval',
+  '@deepseek-ai/dsh-client-ui-attachment',
+  '@deepseek-ai/dsh-client-ui-brand-official',
+  '@deepseek-ai/dsh-client-ui-chat',
+  '@deepseek-ai/dsh-client-ui-commands',
+  '@deepseek-ai/dsh-client-ui-conversation',
+  '@deepseek-ai/dsh-client-ui-cordis',
+  '@deepseek-ai/dsh-client-ui-deliverables',
+  '@deepseek-ai/dsh-client-ui-directory-picker-browse',
+  '@deepseek-ai/dsh-client-ui-directory-picker-native',
+  '@deepseek-ai/dsh-client-ui-goal',
+  '@deepseek-ai/dsh-client-ui-input-trigger',
+  '@deepseek-ai/dsh-client-ui-jobs',
+  '@deepseek-ai/dsh-client-ui-layout',
+  '@deepseek-ai/dsh-client-ui-message-feedback',
+  '@deepseek-ai/dsh-client-ui-model-selection',
+  '@deepseek-ai/dsh-client-ui-open-in-app',
+  '@deepseek-ai/dsh-client-ui-permission-presets',
+  '@deepseek-ai/dsh-client-ui-plan',
+  '@deepseek-ai/dsh-client-ui-reference',
+  '@deepseek-ai/dsh-client-ui-renderer',
+  '@deepseek-ai/dsh-client-ui-schedule',
+  '@deepseek-ai/dsh-client-ui-session',
+  '@deepseek-ai/dsh-client-ui-settings',
+  '@deepseek-ai/dsh-client-ui-settings-general',
+  '@deepseek-ai/dsh-client-ui-settings-models',
+  '@deepseek-ai/dsh-client-ui-settings-plugin-inventory',
+  '@deepseek-ai/dsh-client-ui-settings-plugins',
+  '@deepseek-ai/dsh-client-ui-sidebar',
+  '@deepseek-ai/dsh-client-ui-sidebar-documentpreview',
+  '@deepseek-ai/dsh-client-ui-sidebar-files',
+  '@deepseek-ai/dsh-client-ui-sidebar-right',
+  '@deepseek-ai/dsh-client-ui-skill',
+  '@deepseek-ai/dsh-client-ui-subagent',
+  '@deepseek-ai/dsh-client-ui-theme',
+  '@deepseek-ai/dsh-client-ui-tool',
+  '@deepseek-ai/dsh-client-ui-trajectory',
+  '@deepseek-ai/dsh-client-ui-user-questions',
+  '@deepseek-ai/dsh-client-ui-workflow-run',
+  '@deepseek-ai/dsh-client-ui-workspace',
+  '@deepseek-ai/dsh-cmdline',
   '@deepseek-ai/dsh-code-runtime',
+  '@deepseek-ai/dsh-code-runtime-worker-thread',
+  '@deepseek-ai/dsh-command-compact',
+  '@deepseek-ai/dsh-command-feedback',
+  '@deepseek-ai/dsh-command-goal',
+  '@deepseek-ai/dsh-commands',
   '@deepseek-ai/dsh-compaction',
+  '@deepseek-ai/dsh-compaction-basic',
+  '@deepseek-ai/dsh-compaction-tool-result-pruner',
+  '@deepseek-ai/dsh-cordis-client-runner',
+  '@deepseek-ai/dsh-cordis-host-runner',
   '@deepseek-ai/dsh-credentials',
+  '@deepseek-ai/dsh-credentials-local',
+  '@deepseek-ai/dsh-deepseek-llm-api-extensions',
+  '@deepseek-ai/dsh-deque',
+  '@deepseek-ai/dsh-file-reference',
+  '@deepseek-ai/dsh-file-reference-local',
   '@deepseek-ai/dsh-fs',
+  '@deepseek-ai/dsh-fs-local',
+  '@deepseek-ai/dsh-fs-observation-policy',
+  '@deepseek-ai/dsh-fs-sandbox',
+  '@deepseek-ai/dsh-goal',
+  '@deepseek-ai/dsh-goal-round-driver',
+  '@deepseek-ai/dsh-headless',
   '@deepseek-ai/dsh-home-paths',
+  '@deepseek-ai/dsh-hook-protocol',
+  '@deepseek-ai/dsh-hooks-claude-code',
+  '@deepseek-ai/dsh-hooks-codex',
+  '@deepseek-ai/dsh-host-directory-picker',
+  '@deepseek-ai/dsh-host-directory-picker-auto',
+  '@deepseek-ai/dsh-host-directory-picker-browse',
+  '@deepseek-ai/dsh-host-directory-picker-native',
+  '@deepseek-ai/dsh-host-frontend-static',
+  '@deepseek-ai/dsh-host-open-in-app',
+  '@deepseek-ai/dsh-host-plugin-inventory',
+  '@deepseek-ai/dsh-host-webserver',
+  '@deepseek-ai/dsh-http-proxy',
   '@deepseek-ai/dsh-invariants',
   '@deepseek-ai/dsh-jobs',
   '@deepseek-ai/dsh-jobs-local',
   '@deepseek-ai/dsh-launch-environment',
   '@deepseek-ai/dsh-llm',
+  '@deepseek-ai/dsh-llm-deepseek',
+  '@deepseek-ai/dsh-llm-pi-ai',
   '@deepseek-ai/dsh-llm-retry',
+  '@deepseek-ai/dsh-mcp-client',
+  '@deepseek-ai/dsh-message-feedback',
+  '@deepseek-ai/dsh-native-command',
   '@deepseek-ai/dsh-output-retention',
+  '@deepseek-ai/dsh-package-manifest',
+  '@deepseek-ai/dsh-permission-presets',
+  '@deepseek-ai/dsh-persona',
+  '@deepseek-ai/dsh-plan-mode',
+  '@deepseek-ai/dsh-plugin-package-inventory-deepseek',
   '@deepseek-ai/dsh-pwsh-local',
+  '@deepseek-ai/dsh-pwsh-sandbox',
+  '@deepseek-ai/dsh-repeat-tool-reminder',
   '@deepseek-ai/dsh-sandbox',
+  '@deepseek-ai/dsh-sandbox-local',
+  '@deepseek-ai/dsh-sandbox-policy',
   '@deepseek-ai/dsh-sandbox-windows-acl',
+  '@deepseek-ai/dsh-schedule',
   '@deepseek-ai/dsh-scope',
+  '@deepseek-ai/dsh-sdk-app',
+  '@deepseek-ai/dsh-sdk-jsonrpc-server',
+  '@deepseek-ai/dsh-sdk-minimal',
+  '@deepseek-ai/dsh-sdk-protocol',
   '@deepseek-ai/dsh-session',
+  '@deepseek-ai/dsh-session-checkpoint-policy',
+  '@deepseek-ai/dsh-session-format',
+  '@deepseek-ai/dsh-session-format-catalog',
+  '@deepseek-ai/dsh-session-format-v0-to-v1',
+  '@deepseek-ai/dsh-session-format-v1-to-v2',
+  '@deepseek-ai/dsh-session-format-v2-to-v3',
+  '@deepseek-ai/dsh-session-log-deepseek',
+  '@deepseek-ai/dsh-session-log-export',
   '@deepseek-ai/dsh-session-persistence',
+  '@deepseek-ai/dsh-session-persistence-jsonl',
+  '@deepseek-ai/dsh-session-projection',
   '@deepseek-ai/dsh-session-projection-cache',
   '@deepseek-ai/dsh-session-query',
+  '@deepseek-ai/dsh-session-query-sqlite',
+  '@deepseek-ai/dsh-session-reference',
+  '@deepseek-ai/dsh-session-stats',
+  '@deepseek-ai/dsh-session-telemetry',
+  '@deepseek-ai/dsh-session-telemetry-otel',
   '@deepseek-ai/dsh-session-title',
+  '@deepseek-ai/dsh-session-title-first-prompt-llm',
+  '@deepseek-ai/dsh-session-title-llm',
+  '@deepseek-ai/dsh-session-turn-outline',
   '@deepseek-ai/dsh-settings',
+  '@deepseek-ai/dsh-settings-file',
   '@deepseek-ai/dsh-shell',
+  '@deepseek-ai/dsh-shell-env',
+  '@deepseek-ai/dsh-skill',
+  '@deepseek-ai/dsh-skill-badge',
+  '@deepseek-ai/dsh-skill-filesystem',
   '@deepseek-ai/dsh-spill',
+  '@deepseek-ai/dsh-spill-local',
+  '@deepseek-ai/dsh-spill-policy',
   '@deepseek-ai/dsh-storage',
   '@deepseek-ai/dsh-storage-domain',
+  '@deepseek-ai/dsh-storage-json',
+  '@deepseek-ai/dsh-subagent',
+  '@deepseek-ai/dsh-subagent-fork-in-process',
   '@deepseek-ai/dsh-subagent-in-process-driver',
+  '@deepseek-ai/dsh-subagent-spawn-in-process',
   '@deepseek-ai/dsh-subprocess',
+  '@deepseek-ai/dsh-subprocess-local',
   '@deepseek-ai/dsh-system-prompt',
+  '@deepseek-ai/dsh-terminal',
+  '@deepseek-ai/dsh-terminal-bash',
+  '@deepseek-ai/dsh-time-context',
   '@deepseek-ai/dsh-timeout',
+  '@deepseek-ai/dsh-tmux-context',
+  '@deepseek-ai/dsh-token-meter',
+  '@deepseek-ai/dsh-tool-ask-user',
+  '@deepseek-ai/dsh-tool-bash',
+  '@deepseek-ai/dsh-tool-bash-persistent',
+  '@deepseek-ai/dsh-tool-call-timeout-policy',
+  '@deepseek-ai/dsh-tool-cordis',
+  '@deepseek-ai/dsh-tool-fs',
+  '@deepseek-ai/dsh-tool-fs-search',
+  '@deepseek-ai/dsh-tool-goal',
+  '@deepseek-ai/dsh-tool-jobs',
+  '@deepseek-ai/dsh-tool-present',
+  '@deepseek-ai/dsh-tool-pwsh',
+  '@deepseek-ai/dsh-tool-pwsh-persistent',
+  '@deepseek-ai/dsh-tool-ralph',
+  '@deepseek-ai/dsh-tool-skill',
+  '@deepseek-ai/dsh-tool-str-replace-editor',
+  '@deepseek-ai/dsh-tool-subagent',
+  '@deepseek-ai/dsh-tool-subagent-control',
+  '@deepseek-ai/dsh-tool-todo',
+  '@deepseek-ai/dsh-tool-web',
+  '@deepseek-ai/dsh-tool-workflow',
   '@deepseek-ai/dsh-tools',
+  '@deepseek-ai/dsh-typert-loader',
   '@deepseek-ai/dsh-typert-protocol',
+  '@deepseek-ai/dsh-typert-registry',
+  '@deepseek-ai/dsh-user-approval',
+  '@deepseek-ai/dsh-user-questions',
+  '@deepseek-ai/dsh-util-crypto',
+  '@deepseek-ai/dsh-util-time',
+  '@deepseek-ai/dsh-util-values',
+  '@deepseek-ai/dsh-util-workspace-path',
+  '@deepseek-ai/dsh-web',
+  '@deepseek-ai/dsh-web-app',
+  '@deepseek-ai/dsh-web-fetch-http',
+  '@deepseek-ai/dsh-web-frontend',
+  '@deepseek-ai/dsh-web-search-deepseek',
+  '@deepseek-ai/dsh-webhook',
+  '@deepseek-ai/dsh-webhook-github',
+  '@deepseek-ai/dsh-win32-process',
   '@deepseek-ai/dsh-workflow',
+  '@deepseek-ai/dsh-workflow-worker-thread',
+  '@deepseek-ai/dsh-workspace',
 ] as const;
 
 /**
- * Build the immutable ACP host composition consumed by dsh-acp-demo.
- *
- * Registries, persistence, policy, and execution backends live on the host
- * plane. Model-facing tools and prompt sections are mounted per Agent from the
- * official preset files rooted at `presetRoot`.
+ * Cordis-ecosystem packages version independently of the Harness family: the
+ * `0.1.5-rc.2` packages peer on `@deepseek-ai/cordis@^4.0.2`,
+ * `@deepseek-ai/cordis-plugin-hmr@^1.0.17`, and so on, and none of them
+ * publishes a `0.1.5-rc.2` release. Requesting one at
+ * `DEEPSEEK_HARNESS_VERSION` fails the cold install outright with `ETARGET`,
+ * so the launcher installs these exact releases instead. Every key must name a
+ * package already listed in `DEEPSEEK_HARNESS_NPX_PACKAGES`.
  */
-export function createDeepSeekHarnessCordisConfig(
-  adapterPath: string,
-  presetRoot: string,
-  sessionCompression: DeepSeekHarnessSessionCompression = DEEPSEEK_HARNESS_DEFAULT_SESSION_COMPRESSION
-): string {
-  return `# Generated for acp-extension-dsh. API credentials stay in the host environment.
-- id: settings
-  name: '@deepseek-ai/dsh-settings-file'
+export const DEEPSEEK_HARNESS_CORDIS_PACKAGE_VERSIONS: Readonly<Record<string, string>> = {
+  '@deepseek-ai/cordis': '4.0.2',
+  '@deepseek-ai/cordis-plugin-group': '1.0.2',
+  '@deepseek-ai/cordis-plugin-hmr': '1.0.17',
+  '@deepseek-ai/cordis-plugin-include': '1.0.7',
+  '@deepseek-ai/cordis-plugin-loader': '1.0.3',
+  '@deepseek-ai/cordis-plugin-timer': '1.1.4',
+};
 
-- id: agent-spine
-  name: '@deepseek-ai/dsh-agent-spine-demo'
-  config:
-    workspaceContext: false
-    skills:
-      enabled: false
-    toolBash: false
-    toolJobs: false
-    goals: false
-    persona: ''
+/**
+ * Exact `name@version` specifiers the launcher installs: Harness-family
+ * packages take `DEEPSEEK_HARNESS_VERSION`, the Cordis-ecosystem exceptions
+ * take their own release.
+ */
+export function createDeepSeekHarnessNpxSpecifiers(
+  versions: Readonly<Record<string, string>> = DEEPSEEK_HARNESS_CORDIS_PACKAGE_VERSIONS
+): string[] {
+  return DEEPSEEK_HARNESS_NPX_PACKAGES.map(
+    (packageName) => `${packageName}@${versions[packageName] ?? DEEPSEEK_HARNESS_VERSION}`
+  );
+}
 
-- id: session-persistence
-  name: '@deepseek-ai/dsh-session-persistence-jsonl'
+/** Generated files written into the profile directory before launch. */
+export type DeepSeekHarnessProfileFiles = {
+  packageJson: string;
+  cordisYml: string;
+  cordisPatchYml: string;
+  pnpmWorkspaceYaml: string;
+};
+
+export type DeepSeekHarnessProfileConfig = {
+  /** Absolute path of the bundled ACP adapter entry (`deepseek-acp.js`). */
+  adapterPath: string;
+  /** Root holding the pinned standard/PTC/minimal/creator Agent presets. */
+  presetRoot: string;
+  sessionCompression?: DeepSeekHarnessSessionCompression;
+  provider?: string;
+  model?: string;
+  reasoningEffort?: string;
+};
+
+const PROFILE_PNPM_WORKSPACE = 'packages:\n  - .\n\nnodeLinker: hoisted\nautoInstallPeers: false\n';
+
+/** Build the profile files without touching the filesystem. */
+export function createDeepSeekHarnessProfileFiles(
+  config: DeepSeekHarnessProfileConfig
+): DeepSeekHarnessProfileFiles {
+  const provider = config.provider?.trim() || DEEPSEEK_HARNESS_PROVIDER;
+  const model = config.model?.trim() || DEEPSEEK_HARNESS_DEFAULT_MODEL;
+  const compression = config.sessionCompression ?? DEEPSEEK_HARNESS_DEFAULT_SESSION_COMPRESSION;
+  const adapterPath = JSON.stringify(config.adapterPath);
+  const presetRoot = JSON.stringify(config.presetRoot);
+  // Rendered from the shared permission vocabulary so the labels a host shows
+  // in the ACP selector and the presets Harness enforces are the same text.
+  const permissionPresets = DEEPSEEK_HARNESS_PERMISSION_PRESETS.map(
+    (preset) =>
+      `      ${preset.id}:\n` +
+      `        sandbox: ${preset.sandbox}\n` +
+      `        approval: ${preset.approval}\n` +
+      `        name: ${preset.name}\n` +
+      `        description: ${preset.description}`
+  ).join('\n');
+
+  const packageJson =
+    JSON.stringify(
+      {
+        name: `dsh-profile-${DEEPSEEK_HARNESS_PROFILE_NAME}`,
+        private: true,
+        dependencies: {},
+        dsh: {
+          profile: {
+            bundles: [...DEEPSEEK_HARNESS_PROFILE_BUNDLES],
+            patchReload: 'startup',
+          },
+        },
+      },
+      null,
+      2
+    ) + '\n';
+
+  const cordisYml = '[]\n';
+
+  const cordisPatchYml = `# Generated by acp-extension-dsh ${ACP_EXTENSION_DSH_VERSION} for DeepSeek Harness ${DEEPSEEK_HARNESS_VERSION}.
+# API credentials stay in the host environment; never inline them here.
+
+# The ACP host owns no telemetry or product inventory rows.
+- id: session-telemetry-otel
+  disabled: true
+
+- id: plugin-package-inventory-deepseek
+  disabled: true
+
+- id: session-log-deepseek
+  disabled: true
+
+# Titles come from the client; do not spend a model call on the first prompt.
+- id: session-title-llm
+  disabled: true
+
+# Keep sessions and the exact-read query index on Lody's own roots.
+- id: session-persistence-jsonl
   config:
     root: !!js process.env.${ACP_EXTENSION_DSH_SESSION_ROOT_ENV}
-    compression: ${sessionCompression}
+    compression: ${compression}
 
-- id: session-checkpoint
-  name: '@deepseek-ai/dsh-session-checkpoint-policy'
-
-- id: session-query
-  name: '@deepseek-ai/dsh-session-query-sqlite'
+- id: session-query-sqlite
   config:
     path: !!js process.env.${ACP_EXTENSION_DSH_QUERY_PATH_ENV}
     openAt: never
 
-- id: attachment-local
-  name: '@deepseek-ai/dsh-attachment-local'
-
-- id: llm-deepseek
-  name: '@deepseek-ai/dsh-llm-deepseek'
+# The agent factory default for any preset-created child.
+- id: agent-default-model
   config:
-    thinking: enabled
-    reasoningEffort: max
+    provider: ${JSON.stringify(provider)}
+    model: ${JSON.stringify(model)}
 
-- id: sandbox
-  name: '@deepseek-ai/dsh-sandbox-local'
-
-- id: sandbox-policy
-  name: '@deepseek-ai/dsh-sandbox-policy'
+# Preserve the product's three permission modes with client-facing labels.
+- id: permission
   config:
-    mode: workspace-write
-    workspaceRoot: !!js process.cwd()
-
-- id: subprocess
-  name: '@deepseek-ai/dsh-subprocess-local'
-
-- id: bash
-  name: '@deepseek-ai/dsh-bash-sandbox'
-  disabled: !!js process.platform === 'win32'
-  config:
-    timeoutMs: 60000
-
-- id: pwsh
-  name: '@deepseek-ai/dsh-pwsh-sandbox'
-  disabled: !!js process.platform !== 'win32'
-
-- id: approval
-  name: '@deepseek-ai/dsh-user-approval'
-  config:
-    policy: ask
-
-- id: permission-presets
-  name: '@deepseek-ai/dsh-permission-presets'
-  config:
-    defaultPreset: workspace-write
+    defaultPreset: ${DEEPSEEK_HARNESS_DEFAULT_PERMISSION_PRESET}
     presets:
-      read-only:
-        sandbox: read-only
-        approval: ask
-        name: Read-only
-        description: Read inside the workspace; protected writes require one-time approval.
-      workspace-write:
-        sandbox: workspace-write
-        approval: ask
-        name: Workspace write
-        description: Read and write inside the workspace; wider access requires one-time approval.
-      danger-full-access:
-        sandbox: danger-full-access
-        approval: never
-        name: Full access
-        description: Allow unrestricted file and command access without approval prompts.
+${permissionPresets}
 
-# Host-plane services shared by every per-session preset.
-- id: shell-env
-  name: '@deepseek-ai/dsh-shell-env'
+- insert:
+    - id: agent-presets
+      name: '@deepseek-ai/dsh-agent-presets'
+      config:
+        default: standard
+        includeShippedRoot: false
+        includeUserRoot: true
+        roots:
+          - path: ${presetRoot}
+            trust: system
 
-- id: commands
-  name: '@deepseek-ai/dsh-commands'
+    # The shipped presets' delegation group resolves this host-scope opt-in.
+    - id: subagent-model-selection-settings
+      name: '@deepseek-ai/dsh-tool-subagent/model-selection-settings'
 
-- id: fs-sandbox
-  name: '@deepseek-ai/dsh-fs-sandbox'
-  config:
-    cwd: !!js process.cwd()
-
-- id: fs-observation-policy
-  name: '@deepseek-ai/dsh-fs-observation-policy'
-
-- id: skill
-  name: '@deepseek-ai/dsh-skill'
-
-- id: goal
-  name: '@deepseek-ai/dsh-goal'
-
-- id: goal-round-driver
-  name: '@deepseek-ai/dsh-goal-round-driver'
-
-- id: user-questions
-  name: '@deepseek-ai/dsh-user-questions'
-
-- id: session-projection
-  name: '@deepseek-ai/dsh-session-projection'
-
-- id: subagent
-  name: '@deepseek-ai/dsh-subagent'
-
-- id: subagent-spawn-in-process
-  name: '@deepseek-ai/dsh-subagent-spawn-in-process'
-  config:
-    providerName: spawn
-
-- id: subagent-fork-in-process
-  name: '@deepseek-ai/dsh-subagent-fork-in-process'
-  config:
-    providerName: fork
-
-- id: tool-subagent-report
-  name: '@deepseek-ai/dsh-tool-subagent-report'
-
-- id: web
-  name: '@deepseek-ai/dsh-web'
-  config:
-    searchProvider: deepseek-official
-
-- id: web-search-deepseek
-  name: '@deepseek-ai/dsh-web-search-deepseek'
-  config:
-    apiKeyEnv: DEEPSEEK_API_KEY
-
-- id: code-runtime
-  name: '@deepseek-ai/dsh-code-runtime-worker-thread'
-
-- id: cordis-host-runner
-  name: '@deepseek-ai/dsh-cordis-host-runner'
-
-- id: token-meter
-  name: '@deepseek-ai/dsh-token-meter'
-
-# The shipped root supplies the four official modes. AgentPresets also appends
-# $DSH_HOME/.agent-presets so user-authored DSH compositions remain available.
-- id: agent-presets
-  name: '@deepseek-ai/dsh-agent-presets'
-  config:
-    default: standard
-    roots:
-      - path: ${JSON.stringify(presetRoot)}
-        trust: system
-
-- id: acp-agent
-  name: ${JSON.stringify(adapterPath)}
-  inject: [settings]
-  config:
-    provider: deepseek-official
-    model: deepseek-v4-pro
-    reasoningEffort: max
+    - id: acp-agent
+      name: ${adapterPath}
+      inject: [settings]
+      config:
+        provider: ${JSON.stringify(provider)}
+        model: ${JSON.stringify(model)}${config.reasoningEffort ? `\n        reasoningEffort: ${JSON.stringify(config.reasoningEffort)}` : ''}
 `;
+
+  return { packageJson, cordisYml, cordisPatchYml, pnpmWorkspaceYaml: PROFILE_PNPM_WORKSPACE };
 }
+
+/**
+ * A profile directory must exist before the launcher resolves it. The caller
+ * writes these files under `$DSH_HOME/profiles/<DEEPSEEK_HARNESS_PROFILE_NAME>`.
+ */
+export const DEEPSEEK_HARNESS_PROFILE_FILENAMES = {
+  packageJson: 'package.json',
+  cordisYml: 'cordis.yml',
+  cordisPatchYml: 'cordis.patch.yml',
+  pnpmWorkspaceYaml: 'pnpm-workspace.yaml',
+} as const;
