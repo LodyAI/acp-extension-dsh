@@ -5,7 +5,7 @@ ACP session controls and a pinned coding profile for
 
 The package is a Cordis plugin, not a replacement for Harness. It adds ACP model,
 reasoning-effort, permission, and agent-preset selectors, accepts inline images
-when `DeepSeek-V4-Flash-Vision-Exp` is selected, and mounts ACP-provided stdio or
+when the selected model declares image input (the default `deepseek-flash` / DeepSeek-V41-Flash does), and mounts ACP-provided stdio or
 Streamable HTTP MCP servers into each Harness Agent scope. Harness
 continues to own model execution, sandbox enforcement, persistence, preset
 composition, tool execution, and one-shot approvals.
@@ -43,6 +43,9 @@ default models and their vision metadata that should remain selectable. For exam
 ```yaml
 llm-deepseek:
   models:
+    - id: deepseek-flash
+      name: DeepSeek-V41-Flash
+      inputModalities: [text, image]
     - id: deepseek-v4-flash
       name: DeepSeek-V4-Flash
     - id: deepseek-v4-pro
@@ -84,12 +87,15 @@ Publish Core 0.1.5 before releasing this adapter dependency.
 
 - `acp-extension-dsh` exports the Cordis plugin: `apply`, `inject`, and `name`.
 - `acp-extension-dsh/capabilities` exports the selector vocabulary for host UIs.
-- `acp-extension-dsh/profile` exports the pinned Harness package set and ACP
-  host-composition builder.
+- `acp-extension-dsh/profile` exports the pinned Harness version, the
+  same-release npx package closure, and `createDeepSeekHarnessProfileFiles`,
+  which renders the generated `dsh` profile files.
 
-The host launches the pinned `dsh-acp-demo` executable with the generated
-composition and stages this package's official
-`standard`/`code`/`minimal`/`cordis` preset snapshot beside the ACP adapter.
+The host launches the pinned `dsh` executable with
+`--profile lody-acp`, writing the generated profile (the `@deepseek-ai/dsh-base`
+bundle plus the Lody `cordis.patch.yml` overlay) under
+`$DSH_HOME/profiles/lody-acp`. It stages this package's official
+`standard`/`ptc`/`minimal`/`cordis` preset snapshot beside the ACP adapter.
 Harness mounts the selected preset per session and also discovers user presets
 below `$DSH_HOME/.agent-presets`. MCP tools use Harness's native
 `mcp__<server>__<tool>` naming and are removed with their owning ACP session.
@@ -119,8 +125,8 @@ npm run format:check
 Node.js 22 or newer is required.
 
 The optional real-runtime settings regression test uses a preinstalled profile
-closure. Install every package in `DEEPSEEK_HARNESS_NPX_PACKAGES` at
-`DEEPSEEK_HARNESS_VERSION` in a separate directory first, then run:
+closure. Install every specifier `createDeepSeekHarnessNpxSpecifiers()` returns
+in a separate directory first, then run:
 
 ```sh
 DSH_TEST_RUNTIME_ROOT=/absolute/runtime/node_modules npm run test:settings-profile

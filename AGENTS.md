@@ -24,16 +24,22 @@ Harness. Keep it usable without importing Lody packages.
   accepted image bytes before queuing the user message, and re-read committed
   assistant images for ACP output. Prompt completion and cancellation keep the
   slot owned until admission, Agent idle, and ordered output delivery quiesce.
-- `src/profile.ts` owns the pinned Harness version, explicit npx package closure,
-  and ACP host-plane composition. Keep every transitive DSH dependency and peer
-  package in that exact-version closure; Harness caret ranges must never let npm
-  mix a later release candidate into a cold install. `presets/` is the pinned copy
-  of the official `standard`/`code`/`minimal`/`cordis` Agent presets; update it
-  together with the package list and retain the upstream notice. It is excluded
-  from Prettier so the vendored files remain byte-identical to upstream.
-  Mount `dsh-settings-file` in the host composition so settings resolve from
-  `$DSH_HOME/settings.yaml` (or `~/.dsh/settings.yaml`). Keep its package in the
-  exact-version closure; the abstract `dsh-settings` dependency alone reads no file.
+- `src/profile.ts` owns the pinned Harness version, the same-release npx package
+  closure, and the generated `dsh` profile: the pinned `@deepseek-ai/dsh-base`
+  bundle plus a `cordis.patch.yml` overlay that disables telemetry/product rows
+  and mounts this adapter as the ACP entry. That entry's `name` is a module
+  specifier, so render the adapter path as a `file:` URL: a raw Windows path
+  (`C:\...`) parses as the `c:` URL scheme and fails the ESM loader. Keep every
+  transitive DSH dependency
+  and peer package in that exact-version closure; Harness caret ranges must never
+  let npm mix a later release candidate into a cold install. `presets/` is the
+  pinned copy of the official `standard`/`ptc`/`minimal`/`cordis` Agent presets;
+  update it together with the package list and retain the upstream notice. It is
+  excluded from Prettier so the vendored files remain byte-identical to upstream.
+  The base bundle mounts `dsh-settings-file`, so settings resolve from
+  `$DSH_HOME/settings.yaml` (or `~/.dsh/settings.yaml`); keep its package in the
+  exact-version closure because the abstract `dsh-settings` dependency alone
+  reads no file.
   The ACP entry must require `settings` so its first capability request cannot
   cache a default catalog before the user document has loaded.
   Its persistence default matches upstream `zstd`; hosts may select legacy raw
@@ -42,9 +48,15 @@ Harness. Keep it usable without importing Lody packages.
   Keep the SQLite session-query service mounted with `openAt: never`: this ACP
   composition needs its exact-read contract but exposes no full-text search,
   and public Node builds do not reliably include SQLite FTS5.
-  The `0.1.1-rc.2` package family cold-installs under npm 10 with the complete
+  The `0.1.5-rc.2` package family cold-installs under npm 10 with the complete
   same-version closure. Keep the closure exact and do not add `--force` or
-  `--legacy-peer-deps`; either would hide a future peer-graph regression.
+  `--legacy-peer-deps`; either would hide a future peer-graph regression. The
+  Cordis-ecosystem entries in `DEEPSEEK_HARNESS_CORDIS_PACKAGE_VERSIONS` are the
+  exception: they publish on their own release lines, so the launcher must
+  install them from `createDeepSeekHarnessNpxSpecifiers()` instead of appending
+  `DEEPSEEK_HARNESS_VERSION`. Requesting one at the Harness release fails the
+  cold install with `ETARGET`, so never "simplify" the closure back to a single
+  version.
 - `src/capabilities.ts` metadata is authoritative for built-in preset labels exposed
   through ACP. Harness runtime metadata remains authoritative for user presets.
 - Hosts own installation caches, data-directory selection, process supervision,
