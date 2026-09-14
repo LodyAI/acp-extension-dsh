@@ -9,6 +9,8 @@
  * upstream base composition without inheriting the web product surface.
  */
 
+import { pathToFileURL } from 'node:url';
+
 import {
   DEEPSEEK_HARNESS_DEFAULT_PERMISSION_PRESET,
   DEEPSEEK_HARNESS_PERMISSION_PRESETS,
@@ -16,7 +18,7 @@ import {
 
 export const ACP_EXTENSION_DSH_VERSION = '0.2.0';
 export const DEEPSEEK_HARNESS_VERSION = '0.1.5-rc.2';
-export const ACP_EXTENSION_DSH_PROFILE_REVISION = 'v11';
+export const ACP_EXTENSION_DSH_PROFILE_REVISION = 'v12';
 export const ACP_EXTENSION_DSH_SESSION_ROOT_ENV = 'ACP_EXTENSION_DSH_SESSION_ROOT';
 export const ACP_EXTENSION_DSH_QUERY_PATH_ENV = 'ACP_EXTENSION_DSH_QUERY_PATH';
 export const DEEPSEEK_HARNESS_DEFAULT_SESSION_COMPRESSION = 'zstd';
@@ -329,6 +331,21 @@ export type DeepSeekHarnessProfileConfig = {
   reasoningEffort?: string;
 };
 
+/**
+ * The Cordis loader resolves each plugin's `name` as a module specifier, so the
+ * adapter must be a `file:` URL: a raw Windows path (`C:\...`) parses as the
+ * `c:` URL scheme and fails the ESM loader before ACP can initialize. The
+ * `windows` flag mirrors the platform default and lets the Windows conversion
+ * be regression-tested from any CI OS.
+ */
+export function toAdapterModuleSpecifier(
+  adapterPath: string,
+  windows: boolean = process.platform === 'win32'
+): string {
+  if (adapterPath.startsWith('file:')) return adapterPath;
+  return pathToFileURL(adapterPath, { windows }).href;
+}
+
 const PROFILE_PNPM_WORKSPACE = 'packages:\n  - .\n\nnodeLinker: hoisted\nautoInstallPeers: false\n';
 
 /** Build the profile files without touching the filesystem. */
@@ -338,7 +355,7 @@ export function createDeepSeekHarnessProfileFiles(
   const provider = config.provider?.trim() || DEEPSEEK_HARNESS_PROVIDER;
   const model = config.model?.trim() || DEEPSEEK_HARNESS_DEFAULT_MODEL;
   const compression = config.sessionCompression ?? DEEPSEEK_HARNESS_DEFAULT_SESSION_COMPRESSION;
-  const adapterPath = JSON.stringify(config.adapterPath);
+  const adapterPath = JSON.stringify(toAdapterModuleSpecifier(config.adapterPath));
   const presetRoot = JSON.stringify(config.presetRoot);
   // Rendered from the shared permission vocabulary so the labels a host shows
   // in the ACP selector and the presets Harness enforces are the same text.

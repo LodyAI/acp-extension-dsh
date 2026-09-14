@@ -27,7 +27,10 @@ Harness. Keep it usable without importing Lody packages.
 - `src/profile.ts` owns the pinned Harness version, the same-release npx package
   closure, and the generated `dsh` profile: the pinned `@deepseek-ai/dsh-base`
   bundle plus a `cordis.patch.yml` overlay that disables telemetry/product rows
-  and mounts this adapter as the ACP entry. Keep every transitive DSH dependency
+  and mounts this adapter as the ACP entry. That entry's `name` is a module
+  specifier, so render the adapter path as a `file:` URL: a raw Windows path
+  (`C:\...`) parses as the `c:` URL scheme and fails the ESM loader. Keep every
+  transitive DSH dependency
   and peer package in that exact-version closure; Harness caret ranges must never
   let npm mix a later release candidate into a cold install. `presets/` is the
   pinned copy of the official `standard`/`ptc`/`minimal`/`cordis` Agent presets;

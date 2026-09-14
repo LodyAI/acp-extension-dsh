@@ -11,6 +11,7 @@ import {
   DEEPSEEK_HARNESS_VERSION,
   createDeepSeekHarnessNpxSpecifiers,
   createDeepSeekHarnessProfileFiles,
+  toAdapterModuleSpecifier,
 } from './profile.js';
 import {
   DEEPSEEK_HARNESS_DEFAULT_PERMISSION_PRESET,
@@ -111,14 +112,29 @@ describe('DeepSeek Harness profile', () => {
     expect(patch).toContain('default: standard');
     expect(patch).toContain('includeShippedRoot: false');
     expect(patch).toContain('path: "/opt/deepseek-agent-presets"');
-    expect(patch).toContain('name: "/opt/acp-extension-dsh.js"');
+    // `name` is a module specifier, so the filesystem path becomes a file URL.
+    expect(patch).toContain('name: "file:///opt/acp-extension-dsh.js"');
     expect(patch).toContain('inject: [settings]');
     expect(patch).toContain('model: "deepseek-flash"');
     expect(patch).not.toMatch(/api[_-]?key:\s+[^D\n]/iu);
   });
 
+  it('renders a Windows adapter path as a file URL module specifier', () => {
+    // A raw `C:\...` path parses as the `c:` URL scheme and fails the ESM
+    // loader on Windows; the override pins that conversion from any CI OS.
+    expect(toAdapterModuleSpecifier('C:\\Program Files\\Lody\\deepseek-acp.js', true)).toBe(
+      'file:///C:/Program%20Files/Lody/deepseek-acp.js'
+    );
+  });
+
+  it('leaves an already-file adapter specifier untouched', () => {
+    expect(toAdapterModuleSpecifier('file:///opt/acp-extension-dsh.js', true)).toBe(
+      'file:///opt/acp-extension-dsh.js'
+    );
+  });
+
   it('invalidates cached probes when the generated profile contract changes', () => {
-    expect(ACP_EXTENSION_DSH_PROFILE_REVISION).toBe('v11');
+    expect(ACP_EXTENSION_DSH_PROFILE_REVISION).toBe('v12');
   });
 
   it('defaults to upstream-compatible zstd and permits a detected legacy raw root', () => {
