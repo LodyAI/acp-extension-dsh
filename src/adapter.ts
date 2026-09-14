@@ -118,9 +118,7 @@ type HarnessSessionEvent = {
   data: {
     turn?: number | null;
     reason?: HarnessTurnEndReason;
-    chunk?: HarnessStreamChunk;
     message?: { content: HarnessMessageBlock[] };
-    agentPreset?: string;
     compactionId?: string;
     error?: string;
   };
