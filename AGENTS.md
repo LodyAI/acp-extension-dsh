@@ -83,5 +83,9 @@ standard ACP tool-call lifecycle. Compaction meaning belongs only in the shared
 
 ## Checks
 
+`dist/` is generated, not committed; `prepare` runs `npm run build` during
+install so workspace consumers can resolve the `./dist/*` runtime exports. Keep
+that hook when changing the build.
+
 Run `npm run build`, `npm test`, and `npm run format:check` before publishing a
 change. Node.js 22 or newer is required.
