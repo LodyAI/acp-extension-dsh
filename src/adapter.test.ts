@@ -144,8 +144,9 @@ describe('DeepSeek Harness ACP adapter', () => {
     vi.unstubAllGlobals();
   });
 
-  it('applies model, reasoning-effort, and permission selections to Harness state', async () => {
-    vi.stubEnv('DEEPSEEK_BASE_URL', 'https://api.moonshot.cn/v1/');
+  const endpoints = ['https://provider.example/v1/', 'https://api.deepseek.com/v1/'];
+  it.each(endpoints)('applies settings and usage at %s', async (baseUrl) => {
+    vi.stubEnv('DEEPSEEK_BASE_URL', baseUrl);
     vi.stubEnv('DEEPSEEK_API_KEY', 'sk-test');
     const fetchModels = vi.fn(
       async (_input: RequestInfo | URL, _init?: RequestInit) =>
@@ -270,8 +271,15 @@ describe('DeepSeek Harness ACP adapter', () => {
       reasoningEffort: 'max',
     });
 
+    let receiveUsage: (value: Record<string, unknown>) => void = () => {};
+    const usageReceived = new Promise<Record<string, unknown>>((resolve) => {
+      receiveUsage = resolve;
+    });
     const client = new ClientSideConnection(
       () => ({
+        extNotification: async (method, params) => {
+          if (method === '_lody/session/usage_update') receiveUsage(params);
+        },
         requestPermission: async () => ({ outcome: { outcome: 'cancelled' as const } }),
         sessionUpdate: async (notification) => {
           sessionUpdates.push(notification as (typeof sessionUpdates)[number]);
@@ -285,10 +293,56 @@ describe('DeepSeek Harness ACP adapter', () => {
     });
     expect(initialized.agentInfo?.name).toBe('acp-extension-dsh');
     expect(initialized.agentCapabilities._meta).toEqual({
-      lody: { compaction: { version: 1 } },
+      lody: { compaction: { version: 1 }, usage: { version: 1 } },
     });
 
     const created = await client.newSession({ cwd: process.cwd(), mcpServers: [] });
+    harnessListeners.get('session/event')?.(createdHarnessSession, {
+      type: 'request/context',
+      seq: 10,
+      time: 0,
+      data: { provider: 'deepseek-official', model: 'deepseek-flash' },
+    });
+    harnessListeners.get('session/event')?.(createdHarnessSession, {
+      type: 'assistant/message',
+      seq: 11,
+      time: 0,
+      data: {
+        turn: 1,
+        step: 1,
+        message: { content: [] },
+        usage: {
+          inputTokens: 100,
+          outputTokens: 50,
+          cacheReadTokens: 30,
+          reasoningTokens: 20,
+        },
+      },
+    });
+    const reportedUsage = await usageReceived;
+    expect(reportedUsage).toMatchObject({
+      sessionId: created.sessionId,
+      modelUsage: {
+        'deepseek-flash': {
+          inputTokens: 100,
+          outputTokens: 30,
+          cacheReadInputTokens: 30,
+          reasoningOutputTokens: 20,
+        },
+      },
+      delta: { usage: { inputTokens: 100 } },
+    });
+    if (baseUrl === 'https://api.deepseek.com/v1/') {
+      expect(reportedUsage).toMatchObject({
+        modelUsage: {
+          'deepseek-flash': {
+            costUSD: (100 * 0.15 + 30 * 0.003 + 50 * 0.6) / 1e6,
+          },
+        },
+      });
+    } else {
+      expect(reportedUsage).not.toHaveProperty('modelUsage.deepseek-flash.costUSD');
+    }
     expect(created.modes?.currentModeId).toBe('workspace-write');
     expect(selectValue(created.configOptions, 'agent_preset')).toBe('standard');
     expect(selectValue(created.configOptions, 'model')).toBe('kimi-k3');
@@ -311,7 +365,7 @@ describe('DeepSeek Harness ACP adapter', () => {
     });
     expect(fetchModels).toHaveBeenCalledOnce();
     expect(fetchModels).toHaveBeenCalledWith(
-      new URL('https://api.moonshot.cn/v1/models'),
+      new URL('models', baseUrl),
       expect.objectContaining({
         method: 'GET',
         redirect: 'error',

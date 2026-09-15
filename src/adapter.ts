@@ -1,4 +1,9 @@
-import { LODY_PLAN_MODE_CONFIG_ID, createPlanModeConfigOption } from 'acp-extension-core';
+import {
+  LODY_PLAN_MODE_CONFIG_ID,
+  LODY_EXTENSION_METHODS,
+  createPlanModeConfigOption,
+} from 'acp-extension-core';
+import { HarnessUsageTracker, type HarnessTokenUsage } from './usage.js';
 /**
  * ACP surface for DeepSeek Harness.
  *
@@ -115,7 +120,12 @@ type HarnessTurnEndReason =
 
 type HarnessSessionEvent = {
   type: string;
+  seq?: number;
+  time?: number;
   data: {
+    provider?: string;
+    model?: string;
+    usage?: HarnessTokenUsage;
     turn?: number | null;
     reason?: HarnessTurnEndReason;
     message?: { content: HarnessMessageBlock[] };
@@ -126,6 +136,7 @@ type HarnessSessionEvent = {
 
 const LODY_CAPABILITIES = {
   compaction: { version: 1 },
+  usage: { version: 1 },
 } as const satisfies LodyExtensionCapabilities;
 
 type HarnessSession = {
@@ -314,6 +325,7 @@ type InflightPrompt = {
 };
 
 type SessionRecord = {
+  usage: HarnessUsageTracker;
   agent: HarnessAgent;
   dispose(): Promise<void>;
   selection: ModelSelectionRef;
@@ -1236,6 +1248,27 @@ export function apply(ctx: HarnessContext, rawConfig?: DeepSeekAcpAdapterConfig)
     }
     if (PERMISSION_EVENT_TYPES.has(event.type)) schedulePermissionSync(record);
     try {
+      if (event.type === 'request/context' && event.data.provider && event.data.model) {
+        record.usage.setRoute(event.data.provider, event.data.model);
+      }
+      if (event.type === 'assistant/message' && event.data.usage && event.seq !== undefined) {
+        const update = record.usage.record(
+          session.id,
+          event.seq,
+          event.time ?? NaN,
+          event.data.usage
+        );
+        if (update)
+          enqueueOutput(
+            record,
+            () =>
+              conn.extNotification(
+                LODY_EXTENSION_METHODS.sessionUsageUpdate,
+                update as unknown as Record<string, unknown>
+              ),
+            record.inflight
+          );
+      }
       if (event.type === 'assistant/message') {
         const inflight = record.inflight?.turn === event.data.turn ? record.inflight : undefined;
         enqueueOutput(
@@ -1544,6 +1577,9 @@ export function apply(ctx: HarnessContext, rawConfig?: DeepSeekAcpAdapterConfig)
           throw error;
         }
         const record: SessionRecord = {
+          usage: new HarnessUsageTracker(
+            !baseUrl || /^https:\/\/api\.deepseek\.com(?:\/v1)?\/?$/.test(baseUrl)
+          ),
           agent: handle.agent,
           dispose,
           selection,
