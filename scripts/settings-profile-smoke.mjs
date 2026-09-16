@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { Readable, Writable } from 'node:stream';
 import { test } from 'node:test';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { ClientSideConnection, ndJsonStream, PROTOCOL_VERSION } from '@agentclientprotocol/sdk';
 import {
   DEEPSEEK_HARNESS_PROFILE_NAME,
@@ -32,6 +32,18 @@ const cases = [
     expectedModel: 'synthetic-settings-model',
   },
   { name: 'absent settings retain defaults', expectedModel: 'deepseek-flash' },
+  {
+    name: 'stale default preset recovers without rewriting settings',
+    settings: '# legacy default\nagent-presets:\n  default: code\n',
+    expectedModel: 'deepseek-flash',
+    expectedPreset: 'standard',
+  },
+  {
+    name: 'available default preset remains selected',
+    settings: 'agent-presets:\n  default: minimal\n',
+    expectedModel: 'deepseek-flash',
+    expectedPreset: 'minimal',
+  },
   { name: 'invalid YAML fails startup', settings: 'llm-deepseek: [\n', invalid: true },
   {
     name: 'non-mapping settings document fails startup',
@@ -68,7 +80,10 @@ for (const fixture of cases) {
     await writeFile(join(profileDir, 'cordis.patch.yml'), files.cordisPatchYml);
     await writeFile(join(profileDir, 'pnpm-workspace.yaml'), files.pnpmWorkspaceYaml);
 
-    child = spawn(process.execPath, [dshBin, '--profile', DEEPSEEK_HARNESS_PROFILE_NAME], {
+    // Invoke the entry explicitly, as the host does: older Node releases do
+    // not expose import.meta.main and otherwise exit without starting Harness.
+    const bootstrap = `process.argv = [process.execPath, ${JSON.stringify(dshBin)}, '--profile', ${JSON.stringify(DEEPSEEK_HARNESS_PROFILE_NAME)}]; const { runCli } = await import(${JSON.stringify(pathToFileURL(dshBin).href)}); await runCli();`;
+    child = spawn(process.execPath, ['--input-type=module', '--eval', bootstrap], {
       cwd: root,
       env: {
         PATH: process.env.PATH,
@@ -108,7 +123,25 @@ for (const fixture of cases) {
         const model = session.configOptions.find((option) => option.id === 'model');
         const ids = model.options.map((option) => option.value);
         assert.ok(ids.includes(fixture.expectedModel), JSON.stringify(ids));
-        if (fixture.settings) {
+        const preset = session.configOptions.find((option) => option.id === 'agent_preset');
+        assert.equal(preset.currentValue, fixture.expectedPreset ?? 'standard');
+        if (fixture.expectedPreset) {
+          // Replacement connections for old host sessions use session/new too.
+          const replacement = await connection.newSession({ cwd: root, mcpServers: [] });
+          assert.equal(
+            replacement.configOptions.find((option) => option.id === 'agent_preset').currentValue,
+            fixture.expectedPreset
+          );
+          await assert.rejects(
+            connection.setSessionConfigOption({
+              sessionId: session.sessionId,
+              configId: 'agent_preset',
+              value: 'code',
+            }),
+            /agent preset/u
+          );
+        }
+        if (fixture.expectedModel === 'synthetic-settings-model') {
           // The settings document replaces the Harness catalog, so the shipped
           // defaults disappear. The profile-configured model stays visible on
           // purpose: the catalog is advisory, so an unlisted configured route

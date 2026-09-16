@@ -59,6 +59,11 @@ Harness. Keep it usable without importing Lody packages.
   version.
 - `src/capabilities.ts` metadata is authoritative for built-in preset labels exposed
   through ACP. Harness runtime metadata remains authoritative for user presets.
+- Session creation preserves a usable settings default. An unavailable default recovers
+  only to a usable `standard`, with a warning and the actual preset in session metadata
+  and ACP options. Never rewrite settings or choose an arbitrary preset; explicit
+  preset selections remain strict. If both defaults are unavailable, fail before
+  creating an Agent with actionable repair guidance.
 - Hosts own installation caches, data-directory selection, process supervision,
   credentials, and bundling.
 
