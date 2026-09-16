@@ -100,6 +100,14 @@ Harness mounts the selected preset per session and also discovers user presets
 below `$DSH_HOME/.agent-presets`. MCP tools use Harness's native
 `mcp__<server>__<tool>` naming and are removed with their owning ACP session.
 
+If `agent-presets.default` names a missing or broken preset (for example an old
+`code` default), session creation uses the available `standard` preset and logs a
+warning. Session metadata and ACP options report the actual preset; settings are
+left untouched. Available custom defaults remain selected, and explicit preset
+switches still reject unavailable values. If `standard` is also unavailable,
+startup reports how to repair the preset installation or default setting rather
+than selecting another composition.
+
 The generated profile defaults session persistence to upstream's `zstd`
 encoding. A host that reuses an existing Harness session root may pass `none`
 to the profile builder only after verifying that the root contains raw

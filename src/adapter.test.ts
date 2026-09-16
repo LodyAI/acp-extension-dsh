@@ -553,6 +553,110 @@ describe('DeepSeek Harness ACP adapter', () => {
     ).rejects.toThrow(/does not support reasoning effort/u);
   });
 
+  it.each([
+    { defaultId: 'code', presets: [{ id: 'custom' }, { id: 'standard' }], expected: 'standard' },
+    {
+      defaultId: 'broken',
+      presets: [{ id: 'broken', broken: 'invalid composition' }, { id: 'standard' }],
+      expected: 'standard',
+    },
+    { defaultId: 'custom', presets: [{ id: 'standard' }, { id: 'custom' }], expected: 'custom' },
+    { defaultId: 'code', presets: [{ id: 'custom' }], expected: undefined },
+    {
+      defaultId: 'code',
+      presets: [{ id: 'standard', broken: 'invalid composition' }],
+      expected: undefined,
+    },
+    { defaultId: 'code', presets: [], expected: undefined },
+  ])(
+    'resolves default $defaultId from $presets to $expected',
+    async ({ defaultId, presets, expected }) => {
+      type AdapterContext = Parameters<typeof apply>[0];
+      const streams = connectedStreams();
+      const mountedPresets: string[] = [];
+      const metadata: Array<{ agentPreset: string }> = [];
+      const context: AdapterContext = {
+        agents: {
+          async create(options) {
+            metadata.push(options.meta);
+            const agentContext: Parameters<typeof options.setup>[0] = {
+              get: () => undefined,
+              on: () => () => undefined,
+              plugin: () => ({ await: async () => {} }),
+              loader: { import: async () => ({}), unwrapExports: (value) => value },
+            };
+            await options.setup(agentContext);
+            return {
+              agent: {
+                id: options.sessionId,
+                ctx: agentContext,
+                session: {
+                  id: options.sessionId,
+                  header: { id: options.sessionId },
+                  events: [],
+                  append: () => {},
+                },
+                followup: () => {},
+                cancel: () => {},
+                whenIdle: async () => {},
+              },
+              dispose: async () => {},
+            };
+          },
+          get: () => undefined,
+        },
+        permissionPresets: {
+          names: ['read-only'],
+          defaultPreset: 'read-only',
+          current: () => 'read-only',
+          optionOf: permissionOption,
+          set: () => {
+            throw new Error('preset recovery must not change permissions');
+          },
+        },
+        agentPresets: {
+          defaultId,
+          list: async () => presets,
+          mount: async (_ctx, id) => {
+            if (!id) throw new Error('mount requires an explicit preset');
+            mountedPresets.push(id);
+            return { id };
+          },
+          select: async (_agent, id) => id,
+        },
+        logger: { warn: () => {} },
+        on: () => () => undefined,
+        get: testHarnessService,
+        effect: (register) => {
+          disposers.push(register());
+        },
+      };
+      apply(context, { stream: streams.agent });
+      const client = new ClientSideConnection(
+        () => ({
+          sessionUpdate: async () => {},
+          requestPermission: async () => ({ outcome: { outcome: 'cancelled' as const } }),
+        }),
+        streams.client
+      );
+      await client.initialize({ protocolVersion: PROTOCOL_VERSION, clientCapabilities: {} });
+      if (expected) {
+        const session = await client.newSession({ cwd: process.cwd(), mcpServers: [] });
+        expect(selectValue(session.configOptions, 'agent_preset')).toBe(expected);
+        expect(session.modes?.currentModeId).toBe('read-only');
+        expect(metadata).toEqual([expect.objectContaining({ agentPreset: expected })]);
+        expect(mountedPresets).toEqual([expected]);
+      } else {
+        await expect(client.newSession({ cwd: process.cwd(), mcpServers: [] })).rejects.toThrow(
+          /restore the bundled standard preset/u
+        );
+        expect(metadata).toEqual([]);
+        expect(mountedPresets).toEqual([]);
+      }
+      expect(context.agentPresets.defaultId).toBe(defaultId);
+    }
+  );
+
   it('mounts ACP MCP servers in the Agent scope and releases their namespaces on close', async () => {
     type AdapterContext = Parameters<typeof apply>[0];
     type TestAgent = NonNullable<ReturnType<AdapterContext['agents']['get']>>;

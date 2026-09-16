@@ -1522,11 +1522,20 @@ export function apply(ctx: HarnessContext, rawConfig?: DeepSeekAcpAdapterConfig)
         const agentPresetOptions = (await ctx.agentPresets.list()).filter(
           (preset) => preset.broken === undefined
         );
-        const requestedPreset = ctx.agentPresets.defaultId;
+        let requestedPreset = ctx.agentPresets.defaultId;
         if (!agentPresetOptions.some((preset) => preset.id === requestedPreset)) {
-          throw internalError(
-            `default agent preset ${JSON.stringify(requestedPreset)} is unavailable`
+          // A user settings default can outlive its preset across upgrades. Only
+          // the shipped default is a recovery target; never pick an arbitrary
+          // custom composition or rewrite the user's settings to repair it.
+          if (!agentPresetOptions.some((preset) => preset.id === 'standard')) {
+            throw internalError(
+              `default agent preset ${JSON.stringify(requestedPreset)} and recovery preset "standard" are unavailable; restore the bundled standard preset or choose an available agent-presets.default in $DSH_HOME/settings.yaml`
+            );
+          }
+          ctx.logger.warn(
+            `acp-extension-dsh: default agent preset ${JSON.stringify(requestedPreset)} is unavailable; using "standard" for this session without changing settings`
           );
+          requestedPreset = 'standard';
         }
         const mcpServerNames = reserveMcpServerNames(
           params.mcpServers,
