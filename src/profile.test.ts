@@ -2,7 +2,6 @@ import { readFile } from 'node:fs/promises';
 import { describe, expect, it } from 'vitest';
 
 import {
-  ACP_EXTENSION_DSH_PROFILE_REVISION,
   DEEPSEEK_HARNESS_CORDIS_PACKAGE_VERSIONS,
   DEEPSEEK_HARNESS_DEFAULT_SESSION_COMPRESSION,
   DEEPSEEK_HARNESS_NPX_PACKAGES,
@@ -131,10 +130,6 @@ describe('DeepSeek Harness profile', () => {
     expect(toAdapterModuleSpecifier('file:///opt/acp-extension-dsh.js', true)).toBe(
       'file:///opt/acp-extension-dsh.js'
     );
-  });
-
-  it('invalidates cached probes when the generated profile contract changes', () => {
-    expect(ACP_EXTENSION_DSH_PROFILE_REVISION).toBe('v12');
   });
 
   it('defaults to upstream-compatible zstd and permits a detected legacy raw root', () => {

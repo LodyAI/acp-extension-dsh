@@ -4,6 +4,11 @@ import {
   createPlanModeConfigOption,
 } from 'acp-extension-core';
 import { HarnessUsageTracker, type HarnessTokenUsage } from './usage.js';
+import {
+  UserQuestionBridge,
+  type HarnessQuestionRequest,
+  type HarnessQuestionAnswer,
+} from './user-questions.js';
 /**
  * ACP surface for DeepSeek Harness.
  *
@@ -66,6 +71,7 @@ export const inject = [
   'permissionPresets',
   'sessionPersistence',
   'sessionQuery',
+  'userQuestions',
 ];
 
 type ModelSelection = {
@@ -325,6 +331,7 @@ type InflightPrompt = {
 };
 
 type SessionRecord = {
+  questions: UserQuestionBridge;
   usage: HarnessUsageTracker;
   agent: HarnessAgent;
   dispose(): Promise<void>;
@@ -1045,6 +1052,7 @@ export function apply(ctx: HarnessContext, rawConfig?: DeepSeekAcpAdapterConfig)
   let closed = false;
   let conn: AgentSideConnection;
   let imagePromptEnabled = false;
+  let questionCapabilities = { form: false, answerNotes: false };
 
   if (ctx.permissionPresets.names.length === 0) {
     throw new Error('acp-extension-dsh: no permission presets are composed');
@@ -1243,7 +1251,10 @@ export function apply(ctx: HarnessContext, rawConfig?: DeepSeekAcpAdapterConfig)
     if (event.type === 'plan/mode') {
       enqueueNotification(record, {
         sessionId: record.agent.session.id,
-        update: { sessionUpdate: 'config_option_update', configOptions: configOptions(record) },
+        update: {
+          sessionUpdate: 'config_option_update',
+          configOptions: configOptions(record),
+        },
       });
     }
     if (PERMISSION_EVENT_TYPES.has(event.type)) schedulePermissionSync(record);
@@ -1475,11 +1486,33 @@ export function apply(ctx: HarnessContext, rawConfig?: DeepSeekAcpAdapterConfig)
     conn = connection;
     return {
       async initialize(_params: InitializeRequest): Promise<InitializeResponse> {
+        const elicitation = _params.clientCapabilities?._meta?.lody;
+        const notes =
+          elicitation &&
+          typeof elicitation === 'object' &&
+          !Array.isArray(elicitation) &&
+          'elicitation' in elicitation
+            ? elicitation.elicitation
+            : undefined;
+        questionCapabilities = {
+          form: _params.clientCapabilities?.elicitation?.form != null,
+          answerNotes:
+            !!notes &&
+            typeof notes === 'object' &&
+            !Array.isArray(notes) &&
+            'version' in notes &&
+            notes.version === 1 &&
+            'answerNotes' in notes &&
+            notes.answerNotes === true,
+        };
         const { models } = await loadModelCatalog();
         imagePromptEnabled = supportsAcpImagePrompts(attachments, models);
         return {
           protocolVersion: PROTOCOL_VERSION,
-          agentInfo: { name: 'acp-extension-dsh', version: ACP_EXTENSION_DSH_VERSION },
+          agentInfo: {
+            name: 'acp-extension-dsh',
+            version: ACP_EXTENSION_DSH_VERSION,
+          },
           agentCapabilities: {
             promptCapabilities: {
               image: imagePromptEnabled,
@@ -1509,6 +1542,11 @@ export function apply(ctx: HarnessContext, rawConfig?: DeepSeekAcpAdapterConfig)
         }
         const { models, initialModel: initialModelId } = catalog;
         const sessionId = randomUUID();
+        const questions = new UserQuestionBridge(
+          sessionId,
+          (request) => conn.unstable_createElicitation(request),
+          () => questionCapabilities
+        );
         const initialModel = models.find((model) => model.id === initialModelId);
         if (!initialModel) throw internalError('initial model metadata is unavailable');
         const reasoningEffort = resolveReasoningEffort(initialModel, config.reasoningEffort);
@@ -1542,6 +1580,19 @@ export function apply(ctx: HarnessContext, rawConfig?: DeepSeekAcpAdapterConfig)
             agentOptions: { provider: config.provider, model: initialModelId },
             setup: async (agentContext) => {
               installModelSelection(agentContext, selection);
+              agentContext.on(
+                'user-questions/request',
+                (
+                  request: HarnessQuestionRequest & { agent?: HarnessAgent },
+                  next: () => Promise<HarnessQuestionAnswer>
+                ) => {
+                  // Harness userQuestions.ask owns exact-live/root validation. Only
+                  // claim this ACP session's Agent; never answer unowned callers.
+                  if (!request.agent || ownedRecord(request.agent)?.questions !== questions)
+                    return next();
+                  return questions.ask(request);
+                }
+              );
               mountedPreset = (await ctx.agentPresets.mount(agentContext, requestedPreset)).id;
               await mountMcpServers(
                 agentContext,
@@ -1557,6 +1608,7 @@ export function apply(ctx: HarnessContext, rawConfig?: DeepSeekAcpAdapterConfig)
           throw internalError(`failed to create session: ${errorChain(error)}`);
         }
         const dispose = async (): Promise<void> => {
+          questions.cancel();
           try {
             await handle.dispose();
           } finally {
@@ -1577,6 +1629,7 @@ export function apply(ctx: HarnessContext, rawConfig?: DeepSeekAcpAdapterConfig)
           throw error;
         }
         const record: SessionRecord = {
+          questions,
           usage: new HarnessUsageTracker(
             !baseUrl || /^https:\/\/api\.deepseek\.com(?:\/v1)?\/?$/.test(baseUrl)
           ),
@@ -1693,6 +1746,7 @@ export function apply(ctx: HarnessContext, rawConfig?: DeepSeekAcpAdapterConfig)
       cancel(params: CancelNotification): Promise<void> {
         const record = sessions.get(params.sessionId);
         if (!record) return Promise.resolve();
+        record.questions.cancel();
         const inflight = record.inflight;
         if (inflight) {
           inflight.cancelRequested = true;
@@ -1705,6 +1759,7 @@ export function apply(ctx: HarnessContext, rawConfig?: DeepSeekAcpAdapterConfig)
 
       async closeSession(params: CloseSessionRequest): Promise<void> {
         const record = requireSession(params.sessionId);
+        record.questions.cancel();
         sessions.delete(params.sessionId);
         const inflight = record.inflight;
         if (inflight) {
@@ -1733,6 +1788,7 @@ export function apply(ctx: HarnessContext, rawConfig?: DeepSeekAcpAdapterConfig)
     const records = [...sessions.values()];
     sessions.clear();
     for (const record of records) {
+      record.questions.cancel();
       const inflight = record.inflight;
       if (inflight) {
         inflight.cancelRequested = true;
