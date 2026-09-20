@@ -142,3 +142,36 @@ for `settings` so catalog discovery cannot race the initial file read.
 ## Plan configuration
 
 Core’s boolean `plan_mode` option is available only when the current Agent preset mounts the native Plan service. It calls `planMode.set`, preserves sandbox/approval settings, and publishes durable Plan changes as config updates. A pending selection is reflected until its next-step commit; Plan is guidance, not a sandbox policy.
+
+## User questions
+
+Each ACP-owned Agent mounts an answerer for Harness `user-questions/request`.
+The `standard`, `ptc`, and `cordis` presets expose `ask_user_question`; `minimal`
+still does not. Clients must advertise standard `elicitation.form`. The adapter
+sends `elicitation/create` with Core `_meta.lody.elicitation` and restores the
+original Harness question ids and selected option labels in the tool result.
+Free text and single-select Other use the existing replacement-answer flow.
+
+For multi-select, clients advertising Core 0.1.6 `answerNotes` receive a separate
+Other note alongside their selections. A collision-free Other option permits
+custom-only answers; this synthetic label never reaches the tool result.
+Clients without answer notes retain replacement-only Other. Plan-review questions
+display the question and full plan detail, preserve the declared approval label,
+and do not change Plan Mode or permissions.
+
+Harness owns exact-live/root-agent admission (`CALLER_NOT_LIVE` and
+`DELEGATED_CALLER`). Requests queue independently per ACP session. Abort, session
+cancel/close, and connection disposal reject pending tools with `ASK_ABORTED`;
+decline returns `ASK_DECLINED`, transport failure `ANSWER_FAILED`, and malformed
+accepted answers `INVALID_ANSWER`. Cancelled queued requests do not dispatch.
+SDK 1.3's `AgentSideConnection` has no per-request cancellation API: an already
+sent form may remain visible until the host dismisses it or cancels the turn.
+The adapter ignores late answers and releases its local queue immediately.
+
+Run the native tool/service/Cordis/ACP boundary test against the pinned installed
+closure (no model requests or credentials):
+
+```sh
+npm run build
+DSH_TEST_RUNTIME_ROOT=/absolute/runtime/node_modules node --test scripts/user-questions-smoke.mjs
+```

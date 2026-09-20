@@ -62,6 +62,13 @@ Harness. Keep it usable without importing Lody packages.
 - Hosts own installation caches, data-directory selection, process supervision,
   credentials, and bundling.
 
+- `src/user-questions.ts` translates native questions through standard ACP form
+  elicitation and Core metadata. Register its answerer in each ACP Agent scope;
+  retain Harness's live-root admission and never route delegated/unowned callers
+  to a parent's UI. Queue per session, cancel active/waiting requests on teardown,
+  and preserve additive multi-select custom text only after Core answer-notes
+  negotiation. Plan-review intent changes presentation, not Plan or permissions.
+
 The profile and adapter must change together when a selector or Harness service
 contract changes. Credentials must remain in the host environment and must never
 be rendered into a generated profile.
