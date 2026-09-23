@@ -3,6 +3,7 @@ import {
   LODY_EXTENSION_METHODS,
   createPlanModeConfigOption,
 } from 'acp-extension-core';
+import { ToolCallBridge, type ToolPresenter } from './tool-calls.js';
 import { HarnessUsageTracker, type HarnessTokenUsage } from './usage.js';
 import {
   UserQuestionBridge,
@@ -331,6 +332,7 @@ type InflightPrompt = {
 };
 
 type SessionRecord = {
+  tools: ToolCallBridge;
   questions: UserQuestionBridge;
   usage: HarnessUsageTracker;
   agent: HarnessAgent;
@@ -1118,6 +1120,7 @@ export function apply(ctx: HarnessContext, rawConfig?: DeepSeekAcpAdapterConfig)
       if (inflight.messageQueued) {
         await record.agent.whenIdle();
         await record.outputTail;
+        await record.tools.interrupt();
       }
       if (record.inflight !== inflight) return;
       record.inflight = undefined;
@@ -1248,6 +1251,9 @@ export function apply(ctx: HarnessContext, rawConfig?: DeepSeekAcpAdapterConfig)
   ctx.on('session/event', (session: HarnessSession, event: HarnessSessionEvent) => {
     const record = sessions.get(session.header.id);
     if (!record || record.agent.session !== session) return;
+    if (event.type.startsWith('tool/') || event.type === 'turn/end') {
+      enqueueOutput(record, () => record.tools.event(event.type, event.data), record.inflight);
+    }
     if (event.type === 'plan/mode') {
       enqueueNotification(record, {
         sessionId: record.agent.session.id,
@@ -1370,20 +1376,23 @@ export function apply(ctx: HarnessContext, rawConfig?: DeepSeekAcpAdapterConfig)
       next: () => Promise<unknown>
     ): Promise<unknown> | undefined => {
       const record = ownedRecord(request.agent);
-      if (!record || !request.callId) return next();
-      return conn
-        .requestPermission({
-          sessionId: record.agent.session.id,
-          toolCall: { toolCallId: request.callId },
-          options: [
-            { optionId: 'allow-once', name: 'Allow once', kind: 'allow_once' },
-            { optionId: 'reject-once', name: 'Reject', kind: 'reject_once' },
-          ],
-        })
-        .then(({ outcome }) => {
-          if (outcome.outcome === 'cancelled') return 'cancelled';
-          return outcome.optionId === 'allow-once' ? 'allowed-once' : 'rejected';
-        });
+      const callId = request.callId;
+      if (!record || !callId) return next();
+      return record.outputTail.then(() =>
+        conn
+          .requestPermission({
+            sessionId: record.agent.session.id,
+            toolCall: record.tools.permission(callId) ?? { toolCallId: callId },
+            options: [
+              { optionId: 'allow-once', name: 'Allow once', kind: 'allow_once' },
+              { optionId: 'reject-once', name: 'Reject', kind: 'reject_once' },
+            ],
+          })
+          .then(({ outcome }) => {
+            if (outcome.outcome === 'cancelled') return 'cancelled';
+            return outcome.optionId === 'allow-once' ? 'allowed-once' : 'rejected';
+          })
+      );
     }
   );
 
@@ -1629,6 +1638,17 @@ export function apply(ctx: HarnessContext, rawConfig?: DeepSeekAcpAdapterConfig)
           throw error;
         }
         const record: SessionRecord = {
+          tools: new ToolCallBridge({
+            cwd: params.cwd,
+            lookup: (name) => {
+              const tools = handle.agent.ctx.get('tools') as
+                { get(name: string, scope: HarnessAgent): ToolPresenter | undefined } | undefined;
+              return tools?.get(name, handle.agent);
+            },
+            content: (block) => assistantBlockToAcp(block as HarnessMessageBlock, attachments),
+            emit: (update) => notify({ sessionId, update }),
+            warn: (message) => ctx.logger.warn(`acp-extension-dsh: ${message}`),
+          }),
           questions,
           usage: new HarnessUsageTracker(
             !baseUrl || /^https:\/\/api\.deepseek\.com(?:\/v1)?\/?$/.test(baseUrl)

@@ -88,6 +88,17 @@ standard ACP tool-call lifecycle. Compaction meaning belongs only in the shared
 `_meta.lody.activity` contract from `acp-extension-core`; manual compaction has a
 `null` Harness turn owner and automatic compaction has a numeric owner.
 
+## Tool projection
+
+- `src/tool-calls.ts` projects native durable calls/results and PTC dispatches into
+  ACP. Keep state session-local and delivery on the session output queue, including
+  attachment reads. Resolve presenters in the calling Agent's scope; malformed or
+  absent presentation must not hide native arguments, results, or failures.
+- Approval waits for preceding tool updates and carries the known call details.
+  Only successful result-time diffs are edit evidence. Missing results at turn
+  settlement mean unknown outcome, never success. Do not expose another Agent's
+  session events or invent terminal IDs for Harness-owned subprocesses.
+
 ## Usage accounting
 
 - Count committed `assistant/message.data.usage` once by durable event sequence,
