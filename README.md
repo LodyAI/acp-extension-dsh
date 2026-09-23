@@ -175,3 +175,28 @@ closure (no model requests or credentials):
 npm run build
 DSH_TEST_RUNTIME_ROOT=/absolute/runtime/node_modules node --test scripts/user-questions-smoke.mjs
 ```
+
+## Tool calls
+
+The adapter projects durable Harness `tool/call` and `tool/result` events into
+standard ACP tool lifecycles. Each row keeps the tool name, parsed arguments
+(or the original malformed JSON), completion/failure status, and native result
+payload. Text and stored images become ACP content; unsupported blocks remain
+inspectable as JSON. Unavailable attachments produce a visible placeholder.
+Permission requests wait for the preceding call notification and include its
+name, title, kind, arguments and locations.
+
+Agent-scoped tool presenters supply titles, categories, file locations, terminal
+output and successful result-time diffs. Broken or absent presenters fall back
+to native data. Call-time diffs are deliberately not published as evidence of an
+applied edit, and failed calls retain their native error output.
+`tool/ptc-dispatch-start` / `tool/ptc-dispatch` also expose tools inside `run_code`
+as separate rows, with native sub-call IDs; result payloads retain their root and
+parent IDs. The adapter does not invent a host-specific nesting protocol.
+
+Only the exact ACP-owned session contributes rows. Ordered delivery includes
+attachment reads, and prompt settlement drains it before releasing the slot.
+A turn that ends without a recorded tool result closes the remaining row as
+failed with an explicit unknown-outcome explanation, never invented success.
+This does not add child-agent transcript forwarding, token-level tool argument
+streaming, or subprocess stdout streaming that the durable tool events lack.

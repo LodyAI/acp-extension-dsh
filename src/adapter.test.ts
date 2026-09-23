@@ -965,24 +965,23 @@ describe('DeepSeek Harness ACP adapter', () => {
     expect(saveImages).toHaveBeenCalledTimes(1);
   });
 
-  it('streams Harness reasoning and compaction lifecycle updates', async () => {
+  async function streamingHarness(
+    onUpdate: (notification: { sessionId: string; update: Record<string, unknown> }) => void,
+    lookup: (name: string, scope: unknown) => unknown = () => undefined,
+    onPermission?: (request: { toolCall: unknown }) => void,
+    attachments?: unknown
+  ) {
     type AdapterContext = Parameters<typeof apply>[0];
     type TestAgent = NonNullable<ReturnType<AdapterContext['agents']['get']>>;
 
     const streams = connectedStreams();
     const globalListeners = new Map<string, Listener>();
-    const updates: unknown[] = [];
     let createdAgent: TestAgent | undefined;
-    let markUpdated: (() => void) | undefined;
-    const updated = new Promise<void>((resolve) => {
-      markUpdated = resolve;
-    });
-
     const context: AdapterContext = {
       agents: {
         async create(options) {
           const agentContext: Parameters<typeof options.setup>[0] = {
-            get: () => undefined,
+            get: (name) => (name === 'tools' ? { get: lookup } : undefined),
             on: () => () => undefined,
             plugin: () => ({ await: () => Promise.resolve() }),
             loader: {
@@ -997,8 +996,6 @@ describe('DeepSeek Harness ACP adapter', () => {
             session: {
               id: options.sessionId,
               header: { id: options.sessionId },
-              events: [],
-              append: vi.fn(),
             },
             followup: vi.fn(),
             cancel: vi.fn(),
@@ -1029,7 +1026,7 @@ describe('DeepSeek Harness ACP adapter', () => {
         globalListeners.set(event, listener as Listener);
         return () => globalListeners.delete(event);
       },
-      get: testHarnessService,
+      get: (name) => (name === 'attachments' ? attachments : testHarnessService(name)),
       effect: (register) => {
         disposers.push(register());
       },
@@ -1038,11 +1035,11 @@ describe('DeepSeek Harness ACP adapter', () => {
     apply(context, { stream: streams.agent });
     const client = new ClientSideConnection(
       () => ({
-        requestPermission: async () => ({ outcome: { outcome: 'cancelled' as const } }),
-        sessionUpdate: async (notification) => {
-          updates.push(notification);
-          if (updates.length === 8) markUpdated?.();
+        requestPermission: async (request) => {
+          onPermission?.(request);
+          return { outcome: { outcome: 'selected' as const, optionId: 'allow-once' } };
         },
+        sessionUpdate: async (notification) => onUpdate(notification),
       }),
       streams.client
     );
@@ -1053,6 +1050,294 @@ describe('DeepSeek Harness ACP adapter', () => {
     if (!createdAgent || !sessionEvent || !streamEvent) {
       throw new Error('missing Harness session or assistant-stream listener');
     }
+
+    return {
+      client,
+      session,
+      agent: createdAgent,
+      sessionEvent,
+      streamEvent,
+      currentAgent: () => createdAgent!,
+      approval: globalListeners.get('approval/request')!,
+    };
+  }
+
+  it('delivers tool details, nested calls, approval and terminal failures through ACP', async () => {
+    const updates: Array<{ sessionId: string; update: Record<string, unknown> }> = [];
+    let finished!: () => void;
+    const received = new Promise<void>((resolve) => {
+      finished = resolve;
+    });
+    let permission: unknown;
+    const scopes: unknown[] = [];
+    const fixture = await streamingHarness(
+      (notification) => {
+        updates.push(notification);
+        if (notification.update.sessionUpdate === 'agent_message_chunk') finished();
+      },
+      (name, scope) => {
+        scopes.push(scope);
+        if (name === 'bash')
+          return {
+            presentCall: (args: { command: string }) => ({ card: 'terminal', title: args.command }),
+            presentResult: () => ({ card: 'terminal', output: 'hello', exitCode: 0 }),
+          };
+        if (name === 'edit')
+          return {
+            presentCall: () => ({
+              card: 'diff',
+              title: 'Edit a.ts',
+              locations: [{ path: 'a.ts', line: 1 }],
+              diffs: [{ path: 'a.ts', oldText: 'old', newText: 'new' }],
+            }),
+            presentResult: (_args: unknown, result: { meta: unknown }) => result.meta,
+          };
+        if (name === 'broken')
+          return {
+            presentCall: () => {
+              throw new Error('bad presenter');
+            },
+          };
+        return undefined;
+      },
+      (request) => {
+        permission = request.toolCall;
+      }
+    );
+    const { agent, sessionEvent, approval, session } = fixture;
+    const event = (type: string, data: unknown) => sessionEvent(agent.session, { type, data });
+    const result = (
+      id: string,
+      isError = false,
+      content: unknown[] = [{ type: 'text', text: 'done' }],
+      meta?: unknown
+    ) =>
+      event('tool/result', {
+        turn: 1,
+        step: 1,
+        message: { content: [{ type: 'tool-result', toolCallId: id, isError, content }] },
+        ...(meta === undefined ? {} : { meta }),
+      });
+    event('tool/call', { callId: 'shell', name: 'bash', arguments: '{"command":"echo hello"}' });
+    // A duplicate start must not create a second card. Foreign session instances are ignored.
+    event('tool/call', { callId: 'shell', name: 'bash', arguments: '{}' });
+    sessionEvent(
+      { ...agent.session },
+      { type: 'tool/call', data: { callId: 'foreign', name: 'bash', arguments: '{}' } }
+    );
+    expect(await approval({ agent, callId: 'shell' }, async () => 'unowned')).toBe('allowed-once');
+    expect(permission).toMatchObject({
+      toolCallId: 'shell',
+      title: 'echo hello',
+      kind: 'execute',
+      status: 'pending',
+      rawInput: { command: 'echo hello' },
+    });
+    expect(updates.map(({ update }) => update)).toHaveLength(1);
+    result('shell');
+    event('tool/call', { callId: 'edit', name: 'edit', arguments: '{"path":"a.ts"}' });
+    result('edit', false, [{ type: 'text', text: 'applied' }], {
+      card: 'diff',
+      diffs: [{ path: 'a.ts', oldText: 'old', newText: 'new' }],
+    });
+    event('tool/call', { callId: 'bad-edit', name: 'edit', arguments: '{}' });
+    result('bad-edit', true, [{ type: 'text', text: 'permission denied' }], {
+      card: 'diff',
+      diffs: [{ path: 'a.ts', oldText: 'old', newText: 'new' }],
+    });
+    event('tool/call', {
+      callId: 'ptc',
+      name: 'run_code',
+      arguments: '{"code":"await tools.read({path: \"a.ts\"})"}',
+    });
+    const nested = {
+      rootCallId: 'ptc',
+      parentCallId: 'ptc',
+      subCallId: 'ptc:ptc:1',
+      name: 'read',
+      arguments: { path: 'a.ts' },
+    };
+    event('tool/ptc-dispatch-start', nested);
+    event('tool/ptc-dispatch', {
+      ...nested,
+      isError: false,
+      content: [{ type: 'text', text: 'new' }],
+    });
+    result('ptc');
+    event('tool/call', {
+      callId: 'mcp',
+      name: 'mcp__test__fetch',
+      arguments: '{"url":"https://example.test"}',
+    });
+    result('mcp', true, [{ type: 'text', text: 'ABORTED_BEFORE_DISPATCH' }]);
+    event('tool/call', { callId: 'broken', name: 'broken', arguments: '{invalid' });
+    result('broken', false, [
+      { type: 'future-block', value: 'preserved' },
+      { type: 'image', attachment: {} },
+    ]);
+    event('tool/call', {
+      callId: 'interrupted',
+      name: 'bash',
+      arguments: '{"command":"long job"}',
+    });
+    event('turn/end', { turn: 1, reason: { kind: 'aborted' } });
+    event('assistant/message', { message: { content: [{ type: 'text', text: 'barrier' }] } });
+    await received;
+    const tools = updates.map(({ update }) => update).filter((update) => 'toolCallId' in update);
+    const starts = tools.filter((update) => update.sessionUpdate === 'tool_call');
+    const ends = tools.filter((update) => update.sessionUpdate === 'tool_call_update');
+    expect(starts.map((update) => update.toolCallId)).toEqual([
+      'shell',
+      'edit',
+      'bad-edit',
+      'ptc',
+      'ptc:ptc:1',
+      'mcp',
+      'broken',
+      'interrupted',
+    ]);
+    expect(ends.map((update) => [update.toolCallId, update.status])).toEqual([
+      ['shell', 'completed'],
+      ['edit', 'completed'],
+      ['bad-edit', 'failed'],
+      ['ptc:ptc:1', 'completed'],
+      ['ptc', 'completed'],
+      ['mcp', 'failed'],
+      ['broken', 'completed'],
+      ['interrupted', 'failed'],
+    ]);
+    expect(ends[0]).toMatchObject({
+      content: [{ type: 'content', content: { type: 'text', text: 'hello' } }],
+      rawOutput: { message: { content: [{ toolCallId: 'shell' }] } },
+    });
+    expect(starts[1]).toMatchObject({ locations: [{ path: `${process.cwd()}/a.ts`, line: 1 }] });
+    expect(starts[1]).not.toHaveProperty('content');
+    expect(ends[1]).toMatchObject({
+      content: [
+        expect.anything(),
+        { type: 'diff', path: `${process.cwd()}/a.ts`, oldText: 'old', newText: 'new' },
+      ],
+    });
+    expect(ends[2]).toMatchObject({
+      content: [{ type: 'content', content: { text: 'permission denied' } }],
+    });
+    expect(starts[6]).toMatchObject({ title: 'broken', rawInput: '{invalid' });
+    expect(ends[6]).toMatchObject({
+      content: [
+        { type: 'content', content: { text: '{"type":"future-block","value":"preserved"}' } },
+        { type: 'content', content: { text: 'Tool attachment unavailable.' } },
+      ],
+    });
+    expect(ends[7]).toMatchObject({
+      content: [
+        { type: 'content', content: { text: expect.stringContaining('outcome is unknown') } },
+      ],
+    });
+    expect(updates.every((update) => update.sessionId === session.sessionId)).toBe(true);
+    expect(scopes.every((scope) => scope === agent)).toBe(true);
+  });
+
+  it('keeps overlapping sessions isolated and awaits image output before later notifications', async () => {
+    const updates: Array<{ sessionId: string; update: Record<string, unknown> }> = [];
+    let releaseImage!: () => void;
+    const imageReady = new Promise<void>((resolve) => {
+      releaseImage = resolve;
+    });
+    let readStarted!: () => void;
+    const reading = new Promise<void>((resolve) => {
+      readStarted = resolve;
+    });
+    let done!: () => void;
+    const received = new Promise<void>((resolve) => {
+      done = resolve;
+    });
+    const fixture = await streamingHarness(
+      (notification) => {
+        updates.push(notification);
+        if (notification.update.sessionUpdate === 'agent_message_chunk') done();
+      },
+      undefined,
+      undefined,
+      {
+        imageLimits: { mediaTypes: ['image/png'] },
+        saveImages: async () => [],
+        readImage: async (ref: unknown) => {
+          readStarted();
+          await imageReady;
+          return { ref, data: new Uint8Array([1, 2, 3]) };
+        },
+      }
+    );
+    const second = await fixture.client.newSession({ cwd: process.cwd(), mcpServers: [] });
+    const agent2 = fixture.currentAgent();
+    for (const agent of [fixture.agent, agent2])
+      fixture.sessionEvent(agent.session, {
+        type: 'tool/call',
+        data: { callId: 'same-id', name: 'read', arguments: JSON.stringify({ session: agent.id }) },
+      });
+    const content = [
+      {
+        type: 'image',
+        attachment: {
+          attachmentId: 'synthetic-image',
+          mediaType: 'image/png',
+          bytes: 3,
+          width: 1,
+          height: 1,
+        },
+      },
+    ];
+    fixture.sessionEvent(fixture.agent.session, {
+      type: 'tool/result',
+      data: { message: { content: [{ type: 'tool-result', toolCallId: 'same-id', content }] } },
+    });
+    fixture.sessionEvent(fixture.agent.session, {
+      type: 'assistant/message',
+      data: { message: { content: [{ type: 'text', text: 'after image' }] } },
+    });
+    await reading;
+    // A permission request on the other live session flushes that session's queue only.
+    expect(
+      await fixture.approval({ agent: agent2, callId: 'same-id' }, async () => 'unowned')
+    ).toBe('allowed-once');
+    expect(updates.filter((n) => n.update.sessionUpdate === 'tool_call_update')).toEqual([]);
+    releaseImage();
+    await received;
+    const first = updates.filter((n) => n.sessionId === fixture.session.sessionId);
+    expect(first.map((n) => n.update.sessionUpdate)).toEqual([
+      'tool_call',
+      'tool_call_update',
+      'agent_message_chunk',
+    ]);
+    expect(first[1]?.update).toMatchObject({
+      status: 'completed',
+      content: [
+        { type: 'content', content: { type: 'image', data: 'AQID', mimeType: 'image/png' } },
+      ],
+    });
+    expect(updates.filter((n) => n.sessionId === second.sessionId).map((n) => n.update)).toEqual([
+      expect.objectContaining({
+        sessionUpdate: 'tool_call',
+        rawInput: { session: second.sessionId },
+      }),
+    ]);
+  });
+
+  it('streams Harness reasoning and compaction lifecycle updates', async () => {
+    const updates: unknown[] = [];
+    let markUpdated: (() => void) | undefined;
+    const updated = new Promise<void>((resolve) => {
+      markUpdated = resolve;
+    });
+    const {
+      session,
+      agent: createdAgent,
+      sessionEvent,
+      streamEvent,
+    } = await streamingHarness((notification) => {
+      updates.push(notification);
+      if (updates.length === 8) markUpdated?.();
+    });
 
     streamEvent({
       agent: createdAgent,
