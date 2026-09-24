@@ -275,6 +275,10 @@ describe('DeepSeek Harness ACP adapter', () => {
     const usageReceived = new Promise<Record<string, unknown>>((resolve) => {
       receiveUsage = resolve;
     });
+    let titlesDelivered!: () => void;
+    const titlesReceived = new Promise<void>((resolve) => {
+      titlesDelivered = resolve;
+    });
     const client = new ClientSideConnection(
       () => ({
         extNotification: async (method, params) => {
@@ -283,6 +287,11 @@ describe('DeepSeek Harness ACP adapter', () => {
         requestPermission: async () => ({ outcome: { outcome: 'cancelled' as const } }),
         sessionUpdate: async (notification) => {
           sessionUpdates.push(notification as (typeof sessionUpdates)[number]);
+          if (
+            notification.update.sessionUpdate === 'session_info_update' &&
+            notification.update.title === 'Title from user'
+          )
+            titlesDelivered();
         },
       }),
       streams.client
@@ -293,7 +302,7 @@ describe('DeepSeek Harness ACP adapter', () => {
     });
     expect(initialized.agentInfo?.name).toBe('acp-extension-dsh');
     expect(initialized.agentCapabilities._meta).toEqual({
-      lody: { compaction: { version: 1 }, usage: { version: 1 } },
+      lody: { compaction: { version: 1 }, usage: { version: 1 }, sessionTitle: { version: 1 } },
     });
 
     const created = await client.newSession({ cwd: process.cwd(), mcpServers: [] });
@@ -319,6 +328,31 @@ describe('DeepSeek Harness ACP adapter', () => {
         },
       },
     });
+    for (const kind of ['fallback', 'provider', 'user']) {
+      harnessListeners.get('session/event')?.(createdHarnessSession, {
+        type: 'session/title',
+        data: { title: `Title from ${kind}`, source: { kind } },
+      });
+    }
+    harnessListeners.get('session/event')?.(
+      { ...createdHarnessSession },
+      {
+        type: 'session/title',
+        data: { title: 'Unowned session title', source: { kind: 'provider' } },
+      }
+    );
+    await titlesReceived;
+    expect(
+      sessionUpdates
+        .filter((entry) => entry.update.sessionUpdate === 'session_info_update')
+        .map((entry) => entry.update)
+    ).toEqual(
+      ['fallback', 'generated', 'explicit'].map((titleSource, i) => ({
+        sessionUpdate: 'session_info_update',
+        title: `Title from ${['fallback', 'provider', 'user'][i]}`,
+        _meta: { lody: { titleSource } },
+      }))
+    );
     const reportedUsage = await usageReceived;
     expect(reportedUsage).toMatchObject({
       sessionId: created.sessionId,

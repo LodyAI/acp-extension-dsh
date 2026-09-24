@@ -200,3 +200,12 @@ A turn that ends without a recorded tool result closes the remaining row as
 failed with an explicit unknown-outcome explanation, never invented success.
 This does not add child-agent transcript forwarding, token-level tool argument
 streaming, or subprocess stdout streaming that the durable tool events lack.
+
+## Session titles
+
+The managed profile enables the upstream first-prompt LLM title plugin. Initialize
+advertises Core 0.1.7's `_meta.lody.sessionTitle: { version: 1 }`; clients can skip
+a separate title process. Native `session/title` events use the ordered ACP output
+queue and map provider/user/fallback provenance to generated/explicit/fallback
+`titleSource` metadata. Harness owns generation, persistence and user-name protection.
+A failed generation leaves the fallback title; it does not fail the prompt.

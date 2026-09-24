@@ -48,7 +48,11 @@ import {
   type StopReason,
   type Stream,
 } from '@agentclientprotocol/sdk';
-import type { LodyActivityMeta, LodyExtensionCapabilities } from 'acp-extension-core';
+import type {
+  LodyActivityMeta,
+  LodyExtensionCapabilities,
+  LodySessionMeta,
+} from 'acp-extension-core';
 import {
   DEEPSEEK_HARNESS_AGENT_PRESETS,
   DEEPSEEK_HARNESS_API_KEY_ENV,
@@ -72,6 +76,7 @@ export const inject = [
   'permissionPresets',
   'sessionPersistence',
   'sessionQuery',
+  'sessionTitle',
   'userQuestions',
 ];
 
@@ -136,12 +141,15 @@ type HarnessSessionEvent = {
     turn?: number | null;
     reason?: HarnessTurnEndReason;
     message?: { content: HarnessMessageBlock[] };
+    title?: string;
+    source?: { kind: string };
     compactionId?: string;
     error?: string;
   };
 };
 
 const LODY_CAPABILITIES = {
+  sessionTitle: { version: 1 },
   compaction: { version: 1 },
   usage: { version: 1 },
 } as const satisfies LodyExtensionCapabilities;
@@ -1251,6 +1259,19 @@ export function apply(ctx: HarnessContext, rawConfig?: DeepSeekAcpAdapterConfig)
   ctx.on('session/event', (session: HarnessSession, event: HarnessSessionEvent) => {
     const record = sessions.get(session.header.id);
     if (!record || record.agent.session !== session) return;
+    if (event.type === 'session/title' && typeof event.data.title === 'string') {
+      const source = event.data.source?.kind;
+      const titleSource: LodySessionMeta['titleSource'] =
+        source === 'provider' ? 'generated' : source === 'user' ? 'explicit' : 'fallback';
+      enqueueNotification(record, {
+        sessionId: session.id,
+        update: {
+          sessionUpdate: 'session_info_update',
+          title: event.data.title,
+          _meta: { lody: { titleSource } },
+        },
+      });
+    }
     if (event.type.startsWith('tool/') || event.type === 'turn/end') {
       enqueueOutput(record, () => record.tools.event(event.type, event.data), record.inflight);
     }
@@ -1642,7 +1663,8 @@ export function apply(ctx: HarnessContext, rawConfig?: DeepSeekAcpAdapterConfig)
             cwd: params.cwd,
             lookup: (name) => {
               const tools = handle.agent.ctx.get('tools') as
-                { get(name: string, scope: HarnessAgent): ToolPresenter | undefined } | undefined;
+                | { get(name: string, scope: HarnessAgent): ToolPresenter | undefined }
+                | undefined;
               return tools?.get(name, handle.agent);
             },
             content: (block) => assistantBlockToAcp(block as HarnessMessageBlock, attachments),

@@ -88,6 +88,11 @@ standard ACP tool-call lifecycle. Compaction meaning belongs only in the shared
 `_meta.lody.activity` contract from `acp-extension-core`; manual compaction has a
 `null` Harness turn owner and automatic compaction has a numeric owner.
 
+The managed profile retains the upstream first-prompt title plugin. Declare Core
+`sessionTitle` and forward durable `session/title` events on the session output
+queue; map provider/user/fallback sources to generated/explicit/fallback. Never
+upgrade a first-message preview to a generated title.
+
 ## Tool projection
 
 - `src/tool-calls.ts` projects native durable calls/results and PTC dispatches into
