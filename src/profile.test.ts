@@ -92,7 +92,6 @@ describe('DeepSeek Harness profile', () => {
 
     const patch = files.cordisPatchYml;
     expect(patch).toContain('- id: session-telemetry-otel\n  disabled: true');
-    expect(patch).toContain('- id: session-title-llm\n  disabled: true');
     expect(patch).toContain('openAt: never');
     expect(patch).toContain('compression: zstd');
     // The permission block is rendered from the shared vocabulary, so the

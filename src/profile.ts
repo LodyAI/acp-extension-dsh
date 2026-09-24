@@ -400,10 +400,6 @@ export function createDeepSeekHarnessProfileFiles(
 - id: session-log-deepseek
   disabled: true
 
-# Titles come from the client; do not spend a model call on the first prompt.
-- id: session-title-llm
-  disabled: true
-
 # Keep sessions and the exact-read query index on Lody's own roots.
 - id: session-persistence-jsonl
   config:
