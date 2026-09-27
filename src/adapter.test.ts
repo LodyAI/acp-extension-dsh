@@ -6,6 +6,7 @@ import {
   type Stream,
 } from '@agentclientprotocol/sdk';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { isLodySubagentEvent, type LodySubagentEvent } from 'acp-extension-core';
 
 import { apply } from './adapter.js';
 import { DEEPSEEK_HARNESS_AGENT_PRESETS } from './capabilities.js';
@@ -302,7 +303,12 @@ describe('DeepSeek Harness ACP adapter', () => {
     });
     expect(initialized.agentInfo?.name).toBe('acp-extension-dsh');
     expect(initialized.agentCapabilities._meta).toEqual({
-      lody: { compaction: { version: 1 }, usage: { version: 1 }, sessionTitle: { version: 1 } },
+      lody: {
+        compaction: { version: 1 },
+        usage: { version: 1 },
+        sessionTitle: { version: 1 },
+        subagentEvents: { version: 1 },
+      },
     });
 
     const created = await client.newSession({ cwd: process.cwd(), mcpServers: [] });
@@ -1003,7 +1009,8 @@ describe('DeepSeek Harness ACP adapter', () => {
     onUpdate: (notification: { sessionId: string; update: Record<string, unknown> }) => void,
     lookup: (name: string, scope: unknown) => unknown = () => undefined,
     onPermission?: (request: { toolCall: unknown }) => void,
-    attachments?: unknown
+    attachments?: unknown,
+    subagentUpdate?: (event: Record<string, unknown>) => void
   ) {
     type AdapterContext = Parameters<typeof apply>[0];
     type TestAgent = NonNullable<ReturnType<AdapterContext['agents']['get']>>;
@@ -1011,6 +1018,7 @@ describe('DeepSeek Harness ACP adapter', () => {
     const streams = connectedStreams();
     const globalListeners = new Map<string, Listener>();
     let createdAgent: TestAgent | undefined;
+    const childAgents = new Map<string, TestAgent>();
     const context: AdapterContext = {
       agents: {
         async create(options) {
@@ -1019,7 +1027,7 @@ describe('DeepSeek Harness ACP adapter', () => {
             on: () => () => undefined,
             plugin: () => ({ await: () => Promise.resolve() }),
             loader: {
-              import: () => Promise.resolve({}),
+              import: () => Promise.resolve({ carrierKeyOf: (carrier: unknown) => carrier }),
               unwrapExports: (exports) => exports,
             },
           };
@@ -1037,7 +1045,8 @@ describe('DeepSeek Harness ACP adapter', () => {
           };
           return { agent: createdAgent, dispose: () => Promise.resolve() };
         },
-        get: (sessionId) => (createdAgent?.id === sessionId ? createdAgent : undefined),
+        get: (sessionId) =>
+          createdAgent?.id === sessionId ? createdAgent : childAgents.get(sessionId),
       },
       permissionPresets: {
         names: ['read-only', 'workspace-write', 'danger-full-access'],
@@ -1074,10 +1083,16 @@ describe('DeepSeek Harness ACP adapter', () => {
           return { outcome: { outcome: 'selected' as const, optionId: 'allow-once' } };
         },
         sessionUpdate: async (notification) => onUpdate(notification),
+        extNotification: async (_method, params) => subagentUpdate?.(params),
       }),
       streams.client
     );
-    await client.initialize({ protocolVersion: PROTOCOL_VERSION, clientCapabilities: {} });
+    await client.initialize({
+      protocolVersion: PROTOCOL_VERSION,
+      clientCapabilities: subagentUpdate
+        ? { _meta: { lody: { subagentEvents: { version: 1 } } } }
+        : {},
+    });
     const session = await client.newSession({ cwd: process.cwd(), mcpServers: [] });
     const sessionEvent = globalListeners.get('session/event');
     const streamEvent = globalListeners.get('agent/assistant-stream');
@@ -1093,8 +1108,78 @@ describe('DeepSeek Harness ACP adapter', () => {
       streamEvent,
       currentAgent: () => createdAgent!,
       approval: globalListeners.get('approval/request')!,
+      spawnChild: (id: string, nativeId: string, parent = createdAgent!) => {
+        const agent = { ...createdAgent!, id, session: { id, header: { id } } };
+        childAgents.set(id, agent);
+        globalListeners
+          .get('subagent/start')!
+          .call(parent, { id, runId: nativeId, provider: 'spawn', local: true });
+        return agent;
+      },
+      childEnd: (id: string, nativeId: string) =>
+        globalListeners.get('subagent/end')!({
+          id,
+          runId: nativeId,
+          provider: 'spawn',
+          local: true,
+          stopReason: 'completed',
+        }),
     };
   }
+
+  it('streams owned descendant runs over ACP without admitting unrelated agents', async () => {
+    const updates: Array<{ sessionId: string; update: Record<string, unknown> }> = [];
+    const events: LodySubagentEvent[] = [];
+    const done = Promise.withResolvers<void>();
+    const h = await streamingHarness(
+      (value) => updates.push(value),
+      undefined,
+      undefined,
+      undefined,
+      (value) => {
+        if (!isLodySubagentEvent(value)) return;
+        events.push(value);
+        if (value.type === 'snapshot' && value.snapshot.state === 'completed') done.resolve();
+      }
+    );
+    const child = h.spawnChild('child', 'native-one');
+    h.streamEvent({
+      agent: child,
+      frame: { type: 'chunk', chunk: { type: 'reasoning-delta', text: 'Thinking' } },
+    });
+    h.sessionEvent(child.session, {
+      type: 'assistant/message',
+      data: { turn: 1, message: { content: [{ type: 'text', text: 'Found it' }] } },
+    });
+    h.spawnChild('nested', 'native-nested', child);
+    const foreign = {
+      ...child,
+      id: 'foreign',
+      session: { id: 'foreign', header: { id: 'foreign' } },
+    };
+    h.spawnChild('unowned', 'native-foreign', foreign);
+    h.childEnd('child', 'native-one');
+    h.sessionEvent(child.session, {
+      type: 'assistant/message',
+      data: { message: { content: [{ type: 'text', text: 'late' }] } },
+    });
+    await done.promise;
+    expect(events.map((event) => event.type)).toEqual([
+      'snapshot',
+      'output',
+      'output',
+      'snapshot',
+      'snapshot',
+    ]);
+    expect(events[0]).toMatchObject({
+      sessionId: h.session.sessionId,
+      snapshot: { parentRunId: null, support: { stream: ['text', 'thought', 'tool'] } },
+    });
+    expect(events[3]).toMatchObject({ snapshot: { parentRunId: events[0].runId } });
+    expect(updates.filter((value) => value.update.sessionUpdate === 'agent_message_chunk')).toEqual(
+      []
+    );
+  });
 
   it('delivers tool details, nested calls, approval and terminal failures through ACP', async () => {
     const updates: Array<{ sessionId: string; update: Record<string, unknown> }> = [];

@@ -116,6 +116,9 @@ upgrade a first-message preview to a generated title.
 
 ## Checks
 
+- Core subagent events require negotiation and native carrier ancestry; child
+  permissions retain run attribution. See README for stream limits.
+
 `dist/` is generated, not committed; `prepare` runs `npm run build` during
 install so workspace consumers can resolve the `./dist/*` runtime exports. Keep
 that hook when changing the build.

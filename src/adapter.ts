@@ -54,6 +54,11 @@ import type {
   LodySessionMeta,
 } from 'acp-extension-core';
 import {
+  LodySubagentEmitter,
+  LODY_SUBAGENT_EVENT_METHOD,
+  supportsLodySubagentEvents,
+} from 'acp-extension-core';
+import {
   DEEPSEEK_HARNESS_AGENT_PRESETS,
   DEEPSEEK_HARNESS_API_KEY_ENV,
   DEEPSEEK_HARNESS_BASE_URL_ENV,
@@ -149,6 +154,7 @@ type HarnessSessionEvent = {
 };
 
 const LODY_CAPABILITIES = {
+  subagentEvents: { version: 1 },
   sessionTitle: { version: 1 },
   compaction: { version: 1 },
   usage: { version: 1 },
@@ -340,6 +346,7 @@ type InflightPrompt = {
 };
 
 type SessionRecord = {
+  cwd: string;
   tools: ToolCallBridge;
   questions: UserQuestionBridge;
   usage: HarnessUsageTracker;
@@ -1063,6 +1070,27 @@ export function apply(ctx: HarnessContext, rawConfig?: DeepSeekAcpAdapterConfig)
   let conn: AgentSideConnection;
   let imagePromptEnabled = false;
   let questionCapabilities = { form: false, answerNotes: false };
+  let subagentEvents = false;
+  let carrierKeyOf: ((carrier: unknown) => unknown) | undefined;
+  const subagentRuns = new Map<SessionRecord, LodySubagentEmitter>();
+  type Child = {
+    record: SessionRecord;
+    runs: LodySubagentEmitter;
+    nativeId: string;
+    agent?: HarnessAgent;
+    tools?: ToolCallBridge;
+    live: boolean;
+    mirrors: Set<string>;
+  };
+  const children = new Map<string, Child>();
+  type ChildInfo = {
+    id: string;
+    runId: string;
+    provider: string;
+    local: boolean;
+    stopReason?: string;
+    lastAssistantMessage?: HarnessMessageBlock[];
+  };
 
   if (ctx.permissionPresets.names.length === 0) {
     throw new Error('acp-extension-dsh: no permission presets are composed');
@@ -1119,6 +1147,117 @@ export function apply(ctx: HarnessContext, rawConfig?: DeepSeekAcpAdapterConfig)
     notification: SessionNotification,
     inflight?: InflightPrompt
   ): void => enqueueOutput(record, () => notify(notification), inflight);
+
+  ctx.on('subagent/start', function (this: unknown, info: ChildInfo) {
+    if (!subagentEvents || !carrierKeyOf) return;
+    const parent = carrierKeyOf(this) as HarnessAgent | undefined;
+    if (!parent?.session) return;
+    const parentChild = children.get(parent.session.id);
+    const record =
+      ownedRecord(parent) ??
+      (parentChild?.live && parentChild.agent === parent ? parentChild.record : undefined);
+    if (!record || children.get(info.id)?.nativeId === info.runId) return;
+    let runs = subagentRuns.get(record);
+    if (!runs) {
+      runs = new LodySubagentEmitter(record.agent.session.id, (event) =>
+        conn.extNotification(LODY_SUBAGENT_EVENT_METHOD, { ...event })
+      );
+      subagentRuns.set(record, runs);
+    }
+    const emitter = runs;
+    const previous = children.get(info.id);
+    if (previous?.live)
+      enqueueOutput(record, () =>
+        previous.runs.snapshot(previous.nativeId, {
+          state: 'unknown',
+          outputIncomplete: true,
+          reason: { code: 'lost' },
+        })
+      );
+    const agent = info.local ? ctx.agents.get(info.id) : undefined;
+    const child: Child = {
+      record,
+      runs: emitter,
+      nativeId: info.runId,
+      agent,
+      live: true,
+      mirrors: new Set(),
+    };
+    if (agent)
+      child.tools = new ToolCallBridge({
+        cwd: record.cwd,
+        lookup: (name) =>
+          (
+            agent.ctx.get('tools') as
+              | { get(name: string, scope: HarnessAgent): ToolPresenter | undefined }
+              | undefined
+          )?.get(name, agent),
+        content: (block) => assistantBlockToAcp(block as HarnessMessageBlock, attachments),
+        emit: async (update) => {
+          await emitter.output(info.runId, update);
+          const run = emitter.get(info.runId);
+          if (
+            run &&
+            (update.sessionUpdate === 'tool_call' || update.sessionUpdate === 'tool_call_update') &&
+            child.mirrors.has(update.toolCallId)
+          )
+            await notify({
+              sessionId: record.agent.session.id,
+              update: {
+                ...update,
+                toolCallId: `subagent:${encodeURIComponent(run.runId)}:${encodeURIComponent(update.toolCallId)}`,
+                _meta: {
+                  ...update._meta,
+                  lody: { subagentRunId: run.runId, subagentToolCallId: update.toolCallId },
+                },
+              },
+            });
+        },
+        warn: (message) => ctx.logger.warn(`acp-extension-dsh: ${message}`),
+      });
+    children.set(info.id, child);
+    enqueueOutput(record, () =>
+      emitter.start(info.runId, {
+        state: 'running',
+        name: info.provider,
+        parentRunId: parentChild ? emitter.get(parentChild.nativeId)?.runId : null,
+        support: {
+          stream: agent ? ['text', 'thought', 'tool'] : [],
+          progress: false,
+          outputRead: 'none',
+          cancel: false,
+        },
+      })
+    );
+  });
+  ctx.on('subagent/end', (info: ChildInfo) => {
+    const child = children.get(info.id);
+    if (!child?.live || child.nativeId !== info.runId) return;
+    child.live = false;
+    enqueueOutput(child.record, async () => {
+      await child.tools?.interrupt();
+      await child.runs.snapshot(info.runId, {
+        state:
+          info.stopReason === 'completed'
+            ? 'completed'
+            : info.stopReason === 'aborted'
+              ? 'cancelled'
+              : ['error', 'max-tokens', 'refusal'].includes(info.stopReason ?? '')
+                ? 'failed'
+                : 'unknown',
+        ...(!['completed', 'aborted', 'error', 'max-tokens', 'refusal'].includes(
+          info.stopReason ?? ''
+        )
+          ? { outputIncomplete: true }
+          : {}),
+        summary: info.lastAssistantMessage
+          ?.flatMap((block) =>
+            block.type === 'text' && 'text' in block ? [String(block.text)] : []
+          )
+          .join('\n'),
+      });
+    });
+  });
 
   const settleAfterQuiescence = (record: SessionRecord, inflight: InflightPrompt): void => {
     if (inflight.settlementStarted) return;
@@ -1228,6 +1367,23 @@ export function apply(ctx: HarnessContext, rawConfig?: DeepSeekAcpAdapterConfig)
   ctx.on(
     'agent/assistant-stream',
     ({ agent, frame }: { agent: HarnessAgent; frame: HarnessAssistantStreamFrame }) => {
+      const child = children.get(agent.session.id);
+      if (
+        child?.live &&
+        child.agent === agent &&
+        frame.type === 'chunk' &&
+        frame.chunk?.type === 'reasoning-delta' &&
+        frame.chunk.text
+      ) {
+        const text = frame.chunk.text;
+        enqueueOutput(child.record, () =>
+          child.runs.output(child.nativeId, {
+            sessionUpdate: 'agent_thought_chunk',
+            content: { type: 'text', text },
+          })
+        );
+        return;
+      }
       const record = ownedRecord(agent);
       if (!record || frame.type !== 'chunk') return;
       const chunk = frame.chunk;
@@ -1257,6 +1413,24 @@ export function apply(ctx: HarnessContext, rawConfig?: DeepSeekAcpAdapterConfig)
   );
 
   ctx.on('session/event', (session: HarnessSession, event: HarnessSessionEvent) => {
+    const child = children.get(session.id);
+    if (child?.agent?.session === session) {
+      if (!child.live) return;
+      enqueueOutput(child.record, async () => {
+        if (event.type.startsWith('tool/') || event.type === 'turn/end')
+          await child.tools?.event(event.type, event.data);
+        if (event.type === 'assistant/message')
+          for (const block of event.data.message?.content ?? []) {
+            const content = await assistantBlockToAcp(block, attachments);
+            await child.runs.output(
+              child.nativeId,
+              content ? { sessionUpdate: 'agent_message_chunk', content } : null,
+              { nativeTurnId: event.data.turn == null ? undefined : String(event.data.turn) }
+            );
+          }
+      });
+      return;
+    }
     const record = sessions.get(session.header.id);
     if (!record || record.agent.session !== session) return;
     if (event.type === 'session/title' && typeof event.data.title === 'string') {
@@ -1398,6 +1572,31 @@ export function apply(ctx: HarnessContext, rawConfig?: DeepSeekAcpAdapterConfig)
     ): Promise<unknown> | undefined => {
       const record = ownedRecord(request.agent);
       const callId = request.callId;
+      const child = children.get(request.agent.session.id);
+      if (!record && child?.live && child.agent === request.agent && callId) {
+        return child.record.outputTail.then(async () => {
+          const run = child.runs.get(child.nativeId);
+          if (!run || !child.runs.live(child.nativeId)) return 'cancelled';
+          child.mirrors.add(callId);
+          const { outcome } = await conn.requestPermission({
+            sessionId: child.record.agent.session.id,
+            toolCall: {
+              ...child.tools?.permission(callId),
+              toolCallId: `subagent:${encodeURIComponent(run.runId)}:${encodeURIComponent(callId)}`,
+            },
+            _meta: { lody: { subagentRunId: run.runId, subagentToolCallId: callId } },
+            options: [
+              { optionId: 'allow-once', name: 'Allow once', kind: 'allow_once' },
+              { optionId: 'reject-once', name: 'Reject', kind: 'reject_once' },
+            ],
+          });
+          return outcome.outcome === 'cancelled'
+            ? 'cancelled'
+            : outcome.optionId === 'allow-once'
+              ? 'allowed-once'
+              : 'rejected';
+        });
+      }
       if (!record || !callId) return next();
       return record.outputTail.then(() =>
         conn
@@ -1516,6 +1715,7 @@ export function apply(ctx: HarnessContext, rawConfig?: DeepSeekAcpAdapterConfig)
     conn = connection;
     return {
       async initialize(_params: InitializeRequest): Promise<InitializeResponse> {
+        subagentEvents = supportsLodySubagentEvents(_params.clientCapabilities);
         const elicitation = _params.clientCapabilities?._meta?.lody;
         const notes =
           elicitation &&
@@ -1609,6 +1809,14 @@ export function apply(ctx: HarnessContext, rawConfig?: DeepSeekAcpAdapterConfig)
             meta: { cwd: params.cwd, agentPreset: requestedPreset },
             agentOptions: { provider: config.provider, model: initialModelId },
             setup: async (agentContext) => {
+              if (subagentEvents && !carrierKeyOf) {
+                const scope = (await agentContext.loader.import('@deepseek-ai/dsh-scope')) as {
+                  carrierKeyOf?: (carrier: unknown) => unknown;
+                };
+                if (typeof scope.carrierKeyOf !== 'function')
+                  throw new Error('Harness scope identity API is unavailable');
+                carrierKeyOf = scope.carrierKeyOf;
+              }
               installModelSelection(agentContext, selection);
               agentContext.on(
                 'user-questions/request',
@@ -1659,6 +1867,7 @@ export function apply(ctx: HarnessContext, rawConfig?: DeepSeekAcpAdapterConfig)
           throw error;
         }
         const record: SessionRecord = {
+          cwd: params.cwd,
           tools: new ToolCallBridge({
             cwd: params.cwd,
             lookup: (name) => {

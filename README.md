@@ -10,6 +10,15 @@ Streamable HTTP MCP servers into each Harness Agent scope. Harness
 continues to own model execution, sandbox enforcement, persistence, preset
 composition, tool execution, and one-shot approvals.
 
+With bilateral Core `subagentEvents` v1, scoped Harness `subagent/start` and
+`subagent/end` events establish owned executions. Local descendants stream
+committed assistant messages, live reasoning and the existing rich tool projection;
+non-local runs expose lifecycle and final summaries only. Scope-carrier identity,
+not tool titles, establishes ancestry. Child approvals keep run-scoped tool IDs on
+the root ACP connection; delegated questionnaires remain outside the root bridge.
+Normalized runs offer no cancellation/output query controls. Existing clients are
+unchanged. Build standalone releases against Core's new subagent event exports.
+
 The adapter advertises Core's `_meta.lody.compaction` capability and translates
 Harness `compaction/start` and `compaction/end` events into a standard ACP tool
 lifecycle carrying `_meta.lody.activity`. Manual and automatic compaction remain
