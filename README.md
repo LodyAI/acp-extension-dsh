@@ -17,7 +17,7 @@ non-local runs expose lifecycle and final summaries only. Scope-carrier identity
 not tool titles, establishes ancestry. Child approvals keep run-scoped tool IDs on
 the root ACP connection; delegated questionnaires remain outside the root bridge.
 Normalized runs offer no cancellation/output query controls. Existing clients are
-unchanged. Build standalone releases against Core's new subagent event exports.
+unchanged. Core 0.1.9 supplies the subagent event contract and helper.
 
 The adapter advertises Core's `_meta.lody.compaction` capability and translates
 Harness `compaction/start` and `compaction/end` events into a standard ACP tool
