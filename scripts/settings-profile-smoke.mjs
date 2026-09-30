@@ -24,12 +24,39 @@ const extensionRoot = fileURLToPath(new URL('../', import.meta.url));
 // Resolve the launcher through the preinstalled runtime closure.
 const dshBin = join(dirname(runtimeRequire.resolve('@deepseek-ai/dsh/package.json')), 'lib/bin.js');
 
+function decodeModelRoute(value) {
+  if (!value.startsWith('dsh-route:')) return undefined;
+  const decoded = JSON.parse(
+    Buffer.from(value.slice('dsh-route:'.length), 'base64url').toString('utf8')
+  );
+  return Array.isArray(decoded) && decoded.length === 2 ? decoded : undefined;
+}
+
 const cases = [
   {
     name: 'settings catalog is available to the first ACP request',
     settings:
       '# preserved comment\nllm-deepseek:\n  models:\n    - id: synthetic-settings-model\n      name: Synthetic settings model\n',
     expectedModel: 'synthetic-settings-model',
+  },
+  {
+    name: 'pi-ai route is selectable and missing credential fails before provider I/O',
+    settings: `llm-pi-ai:
+  providers:
+    synthetic-route:
+      displayName: Synthetic route
+      apiKeyEnv: SYNTHETIC_ROUTE_API_KEY
+      api: openai-completions
+      baseURL: https://provider.invalid/v1
+      models:
+        - id: shared-model
+          name: Shared model
+          contextWindow: 32768
+          maxTokens: 4096
+`,
+    expectedProvider: 'synthetic-route',
+    expectedModel: 'shared-model',
+    missingCredential: true,
   },
   { name: 'absent settings retain defaults', expectedModel: 'deepseek-flash' },
   { name: 'invalid YAML fails startup', settings: 'llm-deepseek: [\n', invalid: true },
@@ -106,15 +133,34 @@ for (const fixture of cases) {
         await initialized;
         const session = await connection.newSession({ cwd: root, mcpServers: [] });
         const model = session.configOptions.find((option) => option.id === 'model');
-        const ids = model.options.map((option) => option.value);
-        assert.ok(ids.includes(fixture.expectedModel), JSON.stringify(ids));
-        if (fixture.settings) {
-          // The settings document replaces the Harness catalog, so the shipped
-          // defaults disappear. The profile-configured model stays visible on
-          // purpose: the catalog is advisory, so an unlisted configured route
-          // must remain selectable.
-          assert.ok(!ids.includes('deepseek-v4-pro'), JSON.stringify(ids));
-          assert.ok(ids.includes('deepseek-flash'), JSON.stringify(ids));
+        const target = model.options.find((option) => {
+          const [provider, modelId] = decodeModelRoute(option.value) ?? [];
+          return (
+            modelId === fixture.expectedModel &&
+            (fixture.expectedProvider === undefined || provider === fixture.expectedProvider)
+          );
+        });
+        assert.ok(target, JSON.stringify(model.options));
+        if (fixture.settings && !fixture.expectedProvider) {
+          assert.ok(
+            !model.options.some(
+              (option) => decodeModelRoute(option.value)?.[1] === 'deepseek-v4-pro'
+            )
+          );
+        }
+        if (fixture.missingCredential) {
+          await connection.setSessionConfigOption({
+            sessionId: session.sessionId,
+            configId: 'model',
+            value: target.value,
+          });
+          await assert.rejects(
+            connection.prompt({
+              sessionId: session.sessionId,
+              prompt: [{ type: 'text', text: 'Synthetic credential boundary probe' }],
+            }),
+            /MISSING_CREDENTIAL|credential/iu
+          );
         }
       }
       if (fixture.settings !== undefined) {

@@ -18,7 +18,9 @@ import {
 
 export const ACP_EXTENSION_DSH_VERSION = '0.2.0';
 export const DEEPSEEK_HARNESS_VERSION = '0.1.5-rc.2';
-export const ACP_EXTENSION_DSH_PROFILE_REVISION = 'v13';
+export const DEEPSEEK_HARNESS_PI_AI_VERSION = '0.85.1';
+export const DEEPSEEK_HARNESS_SCHEMASTERY_VERSION = '3.18.2';
+export const ACP_EXTENSION_DSH_PROFILE_REVISION = 'v14';
 export const ACP_EXTENSION_DSH_SESSION_ROOT_ENV = 'ACP_EXTENSION_DSH_SESSION_ROOT';
 export const ACP_EXTENSION_DSH_QUERY_PATH_ENV = 'ACP_EXTENSION_DSH_QUERY_PATH';
 export const DEEPSEEK_HARNESS_DEFAULT_SESSION_COMPRESSION = 'zstd';
@@ -307,9 +309,13 @@ export const DEEPSEEK_HARNESS_CORDIS_PACKAGE_VERSIONS: Readonly<Record<string, s
 export function createDeepSeekHarnessNpxSpecifiers(
   versions: Readonly<Record<string, string>> = DEEPSEEK_HARNESS_CORDIS_PACKAGE_VERSIONS
 ): string[] {
-  return DEEPSEEK_HARNESS_NPX_PACKAGES.map(
-    (packageName) => `${packageName}@${versions[packageName] ?? DEEPSEEK_HARNESS_VERSION}`
-  );
+  return [
+    ...DEEPSEEK_HARNESS_NPX_PACKAGES.map(
+      (packageName) => `${packageName}@${versions[packageName] ?? DEEPSEEK_HARNESS_VERSION}`
+    ),
+    `@earendil-works/pi-ai@${DEEPSEEK_HARNESS_PI_AI_VERSION}`,
+    `@deepseek-ai/schemastery@${DEEPSEEK_HARNESS_SCHEMASTERY_VERSION}`,
+  ];
 }
 
 /** Generated files written into the profile directory before launch. */
@@ -416,6 +422,14 @@ export function createDeepSeekHarnessProfileFiles(
   config:
     provider: ${JSON.stringify(provider)}
     model: ${JSON.stringify(model)}
+
+# Dormant until llm-pi-ai.providers in settings.yaml declares a route. The
+# upstream adapter owns profile validation, route lifecycle, and credentials.
+- id: llm-pi-ai
+  name: '@deepseek-ai/dsh-llm-pi-ai'
+  inject: [settings]
+  config:
+    providers: {}
 
 # Preserve the product's three permission modes with client-facing labels.
 - id: permission

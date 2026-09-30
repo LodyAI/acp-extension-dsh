@@ -42,6 +42,9 @@ Harness. Keep it usable without importing Lody packages.
   reads no file.
   The ACP entry must require `settings` so its first capability request cannot
   cache a default catalog before the user document has loaded.
+  Keep `dsh-llm-pi-ai` dormant in the host composition and let its settings namespace
+  own custom route lifecycle and credential references. ACP model ids must encode the
+  exact provider/model pair; never collapse equal model ids or fall back after a route fails.
   Its persistence default matches upstream `zstd`; hosts may select legacy raw
   `none` only after inspecting an existing single-encoding root. A mixed root is
   an error and must never trigger automatic artifact mutation or deletion.

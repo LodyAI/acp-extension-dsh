@@ -72,6 +72,31 @@ Reconnect and refresh the host's model capabilities after catalog edits.
 local-only model IDs into an endpoint's `/models` response. API credentials remain
 in the host environment; generated compositions contain no credentials.
 
+The host also mounts `dsh-llm-pi-ai` with an empty base profile. It remains dormant
+until `settings.yaml` adds a supported route, for example alongside the unchanged
+DeepSeek configuration:
+
+```yaml
+llm-pi-ai:
+  providers:
+    acme-gateway:
+      displayName: Acme Gateway
+      apiKeyEnv: ACME_GATEWAY_API_KEY
+      api: openai-completions
+      baseURL: https://gateway.example/v1
+      models:
+        - id: shared-model
+          name: Shared model
+          contextWindow: 65536
+          maxTokens: 4096
+```
+
+`apiKeyEnv` is a reference resolved by Harness for each request. The key itself is
+not copied into settings, the generated profile, ACP capability data, or Lody's
+workspace state. Removing a route or leaving its named credential unavailable fails
+that selection explicitly; the adapter does not switch back to DeepSeek. Reconnect
+and refresh capabilities after changing the route catalog.
+
 ## Token and USD accounting
 
 Core's usage capability reports committed request usage, cumulative per-model

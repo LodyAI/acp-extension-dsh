@@ -5,6 +5,8 @@ import {
   DEEPSEEK_HARNESS_CORDIS_PACKAGE_VERSIONS,
   DEEPSEEK_HARNESS_DEFAULT_SESSION_COMPRESSION,
   DEEPSEEK_HARNESS_NPX_PACKAGES,
+  DEEPSEEK_HARNESS_PI_AI_VERSION,
+  DEEPSEEK_HARNESS_SCHEMASTERY_VERSION,
   DEEPSEEK_HARNESS_PROFILE_BUNDLES,
   DEEPSEEK_HARNESS_PROFILE_NAME,
   DEEPSEEK_HARNESS_VERSION,
@@ -31,6 +33,7 @@ describe('DeepSeek Harness profile', () => {
         '@deepseek-ai/dsh-base',
         '@deepseek-ai/dsh-agent-presets',
         '@deepseek-ai/dsh-mcp-client',
+        '@deepseek-ai/dsh-llm-pi-ai',
         '@deepseek-ai/dsh-agent-tool-presentation',
         '@deepseek-ai/dsh-attachment-local',
         '@deepseek-ai/dsh-tool-str-replace-editor',
@@ -44,7 +47,7 @@ describe('DeepSeek Harness profile', () => {
   it('pins the Cordis ecosystem at its own releases instead of the Harness release', () => {
     const specifiers = createDeepSeekHarnessNpxSpecifiers();
 
-    expect(specifiers).toHaveLength(DEEPSEEK_HARNESS_NPX_PACKAGES.length);
+    expect(specifiers).toHaveLength(DEEPSEEK_HARNESS_NPX_PACKAGES.length + 2);
     expect(specifiers).toEqual(
       expect.arrayContaining([
         '@deepseek-ai/cordis@4.0.2',
@@ -61,7 +64,11 @@ describe('DeepSeek Harness profile', () => {
       expect(DEEPSEEK_HARNESS_NPX_PACKAGES).toContain(name);
       expect(specifiers).not.toContain(`${name}@${DEEPSEEK_HARNESS_VERSION}`);
     }
-    for (const specifier of specifiers) {
+    expect(specifiers).toContain(`@earendil-works/pi-ai@${DEEPSEEK_HARNESS_PI_AI_VERSION}`);
+    expect(specifiers).toContain(
+      `@deepseek-ai/schemastery@${DEEPSEEK_HARNESS_SCHEMASTERY_VERSION}`
+    );
+    for (const specifier of specifiers.slice(0, DEEPSEEK_HARNESS_NPX_PACKAGES.length)) {
       const separator = specifier.lastIndexOf('@');
       const name = specifier.slice(0, separator);
       const version = specifier.slice(separator + 1);
@@ -94,6 +101,9 @@ describe('DeepSeek Harness profile', () => {
     expect(patch).toContain('- id: session-telemetry-otel\n  disabled: true');
     expect(patch).toContain('openAt: never');
     expect(patch).toContain('compression: zstd');
+    expect(patch).toContain(
+      "- id: llm-pi-ai\n  name: '@deepseek-ai/dsh-llm-pi-ai'\n  inject: [settings]\n  config:\n    providers: {}"
+    );
     // The permission block is rendered from the shared vocabulary, so the
     // selector labels and the enforced presets cannot drift apart.
     expect(patch).toContain(`defaultPreset: ${DEEPSEEK_HARNESS_DEFAULT_PERMISSION_PRESET}`);
