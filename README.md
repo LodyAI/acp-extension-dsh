@@ -243,3 +243,49 @@ a separate title process. Native `session/title` events use the ordered ACP outp
 queue and map provider/user/fallback provenance to generated/explicit/fallback
 `titleSource` metadata. Harness owns generation, persistence and user-name protection.
 A failed generation leaves the fallback title; it does not fail the prompt.
+
+## Session forks
+
+The adapter advertises standard ACP `sessionCapabilities.fork` and Core
+`_meta.lody.forkAtTurn: { version: 1 }`. `session/fork` without a target copies
+the observed native log if no turn is open, including an empty session. With
+`_meta.lody.forkAtTurn: { version: 1, turnId }`, it copies the inclusive prefix
+through that exact native `turn/end`. Root prompt admission and committed
+assistant output publish opaque `_meta.lody.turnId` values such as `dsh-turn:1`.
+Pass those values unchanged, with their source session ID.
+
+Any ended turn can be selected, including an earlier turn while the parent is
+running. Unknown/malformed targets and unfinished turns fail; the adapter never
+rounds a target or silently copies the latest turn. The pinned Harness retains
+raw events across compaction, so a prefix before compaction reconstructs the
+earlier model context. Legacy client history without native markers does not
+gain invented turn boundaries.
+
+Sources are read through Harness's live/persisted query service. Children are
+independent root Agents with native fork lineage, the requested cwd and MCP
+servers, and the prefix's model/reasoning and Agent preset. Permission and Plan
+events remain in the seed for their native projections. An empty history uses
+the normal model/preset defaults when no selection has been logged. No model
+prompt is sent, and the parent is neither cancelled nor reloaded. Historical
+events are not replayed to ACP: the client retains its copied display history.
+
+Prompt completion waits for its native checkpoint so another ACP process can
+read the ended turn immediately. Fork success also waits for the child's native
+durability checkpoint. Failures release
+the child runtime and MCP reservations; a failed checkpoint error identifies
+the child ID because Harness offers no public deletion operation for a stored
+artifact. Forking does not restore project files or create a Git worktree.
+ACP load/resume remains outside this feature.
+
+`npm test` covers ACP routing, capabilities, exact prefixes, configuration,
+failure paths and the durability barrier. The optional native event-store check
+uses the pinned runtime without model calls or credentials:
+
+```sh
+npm run build
+DSH_TEST_RUNTIME_ROOT=/absolute/runtime/node_modules node --test scripts/session-fork-smoke.mjs
+```
+
+It verifies prefix reconstruction, compaction surface replacements, source
+isolation and serialized restoration. It does not exercise actual JSONL/zstd
+restart, model continuation, or the compaction model/plugin.

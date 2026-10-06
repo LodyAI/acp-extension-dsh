@@ -10,6 +10,7 @@ import { isLodySubagentEvent, type LodySubagentEvent } from 'acp-extension-core'
 
 import { apply } from './adapter.js';
 import { DEEPSEEK_HARNESS_AGENT_PRESETS } from './capabilities.js';
+import type { ForkEvent } from './session-fork.js';
 
 type Listener = (...args: unknown[]) => unknown;
 
@@ -108,7 +109,11 @@ function permissionOption(name: string) {
 }
 
 function testHarnessService(name: string): unknown {
-  return name === 'llm' ? DEFAULT_LLM_CATALOG : undefined;
+  return name === 'llm'
+    ? DEFAULT_LLM_CATALOG
+    : name === 'sessions'
+      ? { flush: async () => true }
+      : undefined;
 }
 
 function connectedStreams(): { agent: Stream; client: Stream } {
@@ -151,6 +156,362 @@ describe('DeepSeek Harness ACP adapter', () => {
   });
 
   const endpoints = ['https://provider.example/v1/', 'https://api.deepseek.com/v1/'];
+
+  async function forkHarness() {
+    type Context = Parameters<typeof apply>[0];
+    type Agent = Awaited<ReturnType<Context['agents']['create']>>['agent'];
+    const streams = connectedStreams();
+    const listeners = new Map<string, Listener>();
+    const live = new Map<string, Agent>();
+    const stored = new Map<
+      string,
+      { header: { id: string; agentPreset: string; cwd: string }; events: ForkEvent[] }
+    >();
+    const mounted = new Map<string, unknown[]>();
+    const flushed = new Set<string>();
+    const updates: unknown[] = [];
+    let flushFailure = false;
+    let setupFailure = false;
+    let released = 0;
+    let flushGate: Promise<void> | undefined;
+    let flushStarted: (() => void) | undefined;
+    const context: Context = {
+      agents: {
+        get: (id) => live.get(id),
+        create: async (options) => {
+          const plugins: unknown[] = [];
+          const agentContext: Parameters<typeof options.setup>[0] = {
+            get: () => undefined,
+            on: () => () => {},
+            loader: { import: async () => ({ apply() {} }), unwrapExports: (value) => value },
+            plugin: (_plugin, config) => ({
+              await: async () => {
+                plugins.push(config);
+                if (setupFailure) throw new Error('MCP unavailable');
+              },
+            }),
+          };
+          await options.setup(agentContext);
+          const snapshot = {
+            header: { id: options.sessionId, ...options.meta },
+            events: structuredClone([...(options.seed ?? [])]),
+          };
+          stored.set(options.sessionId, snapshot);
+          mounted.set(options.sessionId, plugins);
+          const agent: Agent = {
+            id: options.sessionId,
+            ctx: agentContext,
+            session: { id: options.sessionId, header: snapshot.header },
+            cancel() {},
+            whenIdle: async () => {},
+            followup(message) {
+              const turn = 9;
+              listeners.get('agent/inbox/claimed')?.({ agent, message, turn });
+              listeners.get('session/event')?.(agent.session, {
+                type: 'assistant/message',
+                data: { turn, message: { content: [{ type: 'text', text: 'continued' }] } },
+              });
+              listeners.get('session/event')?.(agent.session, {
+                type: 'turn/end',
+                data: { turn, reason: { kind: 'completed' } },
+              });
+            },
+          };
+          live.set(agent.id, agent);
+          return {
+            agent,
+            dispose: async () => {
+              live.delete(agent.id);
+            },
+          };
+        },
+      },
+      agentPresets: {
+        defaultId: 'standard',
+        list: async () => [{ id: 'standard' }, { id: 'minimal' }],
+        mount: async (_ctx, id = 'standard') => ({ id }),
+        select: async (_agent, id) => id,
+      },
+      permissionPresets: {
+        names: ['workspace-write'],
+        defaultPreset: 'workspace-write',
+        current: () => 'workspace-write',
+        optionOf: permissionOption,
+        set() {},
+      },
+      logger: { warn() {} },
+      on: (event, listener) => {
+        listeners.set(event, listener as Listener);
+        return () => {};
+      },
+      effect: (register) => {
+        disposers.push(register());
+      },
+      get: (name) => {
+        if (name === 'llm') return DEFAULT_LLM_CATALOG;
+        if (name === 'sessionQuery')
+          return {
+            observeSession: async (id: string) => {
+              const source = stored.get(id);
+              if (!source) throw new Error('missing native session');
+              return {
+                ...structuredClone(source),
+                [Symbol.dispose]() {
+                  released++;
+                },
+              };
+            },
+          };
+        if (name === 'sessions')
+          return {
+            flush: async (session: { id: string }) => {
+              flushStarted?.();
+              await flushGate;
+              if (flushFailure) throw new Error('disk unavailable');
+              flushed.add(session.id);
+              return true;
+            },
+          };
+        return undefined;
+      },
+    };
+    apply(context, { stream: streams.agent, model: 'deepseek-v4-flash' });
+    const client = new ClientSideConnection(
+      () => ({
+        sessionUpdate: async (update) => {
+          updates.push(update);
+        },
+        requestPermission: async () => ({ outcome: { outcome: 'cancelled' as const } }),
+      }),
+      streams.client
+    );
+    const initialized = await client.initialize({
+      protocolVersion: PROTOCOL_VERSION,
+      clientCapabilities: {},
+    });
+    const event = (type: string, data: Record<string, unknown>): ForkEvent => ({
+      type,
+      seq: 0,
+      data,
+    });
+    const events = [
+      event('agent-preset/selected', { agentPreset: 'minimal' }),
+      event('turn/start', { turn: 1 }),
+      event('request/header', {
+        header: {
+          config: {
+            provider: 'deepseek-official',
+            model: 'deepseek-v4-pro',
+            reasoningEffort: 'low',
+          },
+        },
+      }),
+      event('user/message', { content: [{ type: 'text', text: 'first' }] }),
+      event('plugin/opaque', { nested: { preserve: true } }),
+      event('turn/end', { turn: 1, reason: { kind: 'completed' } }),
+      event('turn/start', { turn: 2 }),
+      event('request/header', {
+        header: {
+          config: {
+            provider: 'deepseek-official',
+            model: 'deepseek-v4-flash',
+            reasoningEffort: 'max',
+          },
+        },
+      }),
+      event('turn/end', { turn: 2, reason: { kind: 'completed' } }),
+    ].map((value, seq) => ({ ...value, seq }));
+    stored.set('cold-source', {
+      header: { id: 'cold-source', agentPreset: 'standard', cwd: '/source' },
+      events,
+    });
+    return {
+      client,
+      initialized,
+      stored,
+      live,
+      mounted,
+      flushed,
+      updates,
+      events,
+      setFlushFailure() {
+        flushFailure = true;
+      },
+      setSetupFailure(value: boolean) {
+        setupFailure = value;
+      },
+      blockFlush(gate: Promise<void>, started: () => void) {
+        flushGate = gate;
+        flushStarted = started;
+      },
+      released: () => released,
+    };
+  }
+
+  it('forks cold native histories at exact Core turns, preserving prefixes and target configuration', async () => {
+    const h = await forkHarness();
+    expect(h.initialized.agentCapabilities.sessionCapabilities?.fork).toEqual({});
+    expect(h.initialized.agentCapabilities._meta?.lody).toMatchObject({
+      forkAtTurn: { version: 1 },
+    });
+    const source = structuredClone(h.events);
+    const request = {
+      sessionId: 'cold-source',
+      cwd: '/target',
+      mcpServers: [{ name: 'target-tools', command: 'synthetic', args: [], env: [] }],
+    };
+    const full = await h.client.unstable_forkSession(request);
+    const partial = await h.client.unstable_forkSession({
+      ...request,
+      _meta: { lody: { forkAtTurn: { version: 1, turnId: 'dsh-turn:1' } } },
+    });
+    expect(full.sessionId).not.toBe(partial.sessionId);
+    expect(h.stored.get(full.sessionId)?.events).toEqual(source);
+    expect(h.stored.get(partial.sessionId)?.events).toEqual(source.slice(0, 6));
+    expect(h.stored.get('cold-source')?.events).toEqual(source);
+    expect(h.stored.get(partial.sessionId)?.header).toMatchObject({
+      cwd: '/target',
+      parentSession: 'cold-source',
+      isSeeded: true,
+      agentPreset: 'minimal',
+    });
+    expect(selectValue(partial.configOptions, 'model')).toBe(
+      acpModelId('deepseek-official', 'deepseek-v4-pro')
+    );
+    expect(selectValue(partial.configOptions, 'reasoning_effort')).toBe('low');
+    expect(selectValue(full.configOptions, 'reasoning_effort')).toBe('max');
+    expect(h.mounted.get(partial.sessionId)).toMatchObject([
+      { cwd: '/target', command: 'synthetic' },
+    ]);
+    expect(h.flushed.has(partial.sessionId)).toBe(true);
+    expect(h.released()).toBe(2);
+    await h.client.prompt({
+      sessionId: partial.sessionId,
+      prompt: [{ type: 'text', text: 'continue child' }],
+    });
+    expect(h.updates).toContainEqual(
+      expect.objectContaining({
+        sessionId: partial.sessionId,
+        update: expect.objectContaining({
+          content: { type: 'text', text: 'continued' },
+          _meta: { lody: { turnId: 'dsh-turn:9' } },
+        }),
+      })
+    );
+    expect(h.stored.get('cold-source')?.events).toEqual(source);
+    await h.client.closeSession({ sessionId: partial.sessionId });
+    expect(h.live.has(partial.sessionId)).toBe(false);
+    expect(h.live.has(full.sessionId)).toBe(true);
+  });
+
+  it('rejects invalid/open fork targets and failed setup or durability without publishing a usable child', async () => {
+    const h = await forkHarness();
+    const request = { sessionId: 'cold-source', cwd: '/target', mcpServers: [] };
+    for (const target of [
+      null,
+      { version: 2 },
+      { version: 1, turnId: '' },
+      { version: 1, turnId: 'dsh-turn:999' },
+      { version: 1, turnId: 'dsh-turn:9007199254740992' },
+    ]) {
+      await expect(
+        h.client.unstable_forkSession({ ...request, _meta: { lody: { forkAtTurn: target } } })
+      ).rejects.toThrow();
+    }
+    await expect(
+      h.client.unstable_forkSession({ ...request, additionalDirectories: ['/ignored'] })
+    ).rejects.toThrow('additionalDirectories');
+    await expect(
+      h.client.unstable_forkSession({ ...request, sessionId: 'missing' })
+    ).rejects.toThrow('source unavailable');
+    expect(h.live.size).toBe(0);
+    h.events.push({ seq: h.events.length, type: 'turn/start', data: { turn: 3 } });
+    await expect(h.client.unstable_forkSession(request)).rejects.toThrow('unfinished turn');
+    const explicit = {
+      ...request,
+      _meta: { lody: { forkAtTurn: { version: 1, turnId: 'dsh-turn:1' } } },
+    };
+    const child = await h.client.unstable_forkSession(explicit);
+    expect(h.stored.get(child.sessionId)?.events).toEqual(h.events.slice(0, 6));
+    h.setSetupFailure(true);
+    await expect(
+      h.client.unstable_forkSession({
+        ...explicit,
+        mcpServers: [{ name: 'tools', command: 'synthetic', args: [], env: [] }],
+      })
+    ).rejects.toThrow('MCP unavailable');
+    expect([...h.live.keys()]).toEqual([child.sessionId]);
+    h.setSetupFailure(false);
+    h.setFlushFailure();
+    await expect(h.client.unstable_forkSession(explicit)).rejects.toThrow('disk unavailable');
+    expect([...h.live.keys()]).toEqual([child.sessionId]);
+  });
+
+  it('waits for fork durability before returning the ACP child', async () => {
+    const h = await forkHarness();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let entered!: () => void;
+    const started = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    h.blockFlush(gate, entered);
+    let returned = false;
+    const fork = h.client
+      .unstable_forkSession({ sessionId: 'cold-source', cwd: '/target' })
+      .then((result) => {
+        returned = true;
+        return result;
+      });
+    await started;
+    expect(returned).toBe(false);
+    expect(h.flushed.size).toBe(0);
+    release();
+    const result = await fork;
+    expect(h.flushed.has(result.sessionId)).toBe(true);
+  });
+
+  it('persists ended source turns before prompt completion and reports checkpoint failures', async () => {
+    const h = await forkHarness();
+    const session = await h.client.newSession({ cwd: '/source', mcpServers: [] });
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let entered!: () => void;
+    const started = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    h.blockFlush(gate, entered);
+    let returned = false;
+    const prompt = h.client
+      .prompt({ sessionId: session.sessionId, prompt: [{ type: 'text', text: 'source turn' }] })
+      .then((result) => {
+        returned = true;
+        return result;
+      });
+    await started;
+    expect(returned).toBe(false);
+    expect(h.updates).toContainEqual(
+      expect.objectContaining({
+        sessionId: session.sessionId,
+        update: expect.objectContaining({ _meta: { lody: { turnId: 'dsh-turn:9' } } }),
+      })
+    );
+    release();
+    expect((await prompt).stopReason).toBe('end_turn');
+    expect(h.flushed.has(session.sessionId)).toBe(true);
+    h.setFlushFailure();
+    await expect(
+      h.client.prompt({
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'next turn' }],
+      })
+    ).rejects.toThrow('disk unavailable');
+  });
+
   it.each(endpoints)('applies settings and usage at %s', async (baseUrl) => {
     vi.stubEnv('DEEPSEEK_BASE_URL', baseUrl);
     vi.stubEnv('DEEPSEEK_API_KEY', 'sk-test');
@@ -302,7 +663,7 @@ describe('DeepSeek Harness ACP adapter', () => {
         harnessListeners.set(event, listener as Listener);
         return () => harnessListeners.delete(event);
       },
-      get: (service) => (service === 'llm' ? llm : undefined),
+      get: (service) => (service === 'llm' ? llm : testHarnessService(service)),
       effect: (register) => {
         disposers.push(register());
       },
@@ -346,6 +707,7 @@ describe('DeepSeek Harness ACP adapter', () => {
     expect(initialized.agentInfo?.name).toBe('acp-extension-dsh');
     expect(initialized.agentCapabilities._meta).toEqual({
       lody: {
+        forkAtTurn: { version: 1 },
         compaction: { version: 1 },
         usage: { version: 1 },
         sessionTitle: { version: 1 },
@@ -949,7 +1311,7 @@ describe('DeepSeek Harness ACP adapter', () => {
       get: (service) => {
         if (service === 'attachments') return attachments;
         if (service === 'llm') return llm;
-        return undefined;
+        return testHarnessService(service);
       },
       effect: (register) => {
         disposers.push(register());
