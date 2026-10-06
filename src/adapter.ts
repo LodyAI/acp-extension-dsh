@@ -1,4 +1,11 @@
 import {
+  forkSnapshot,
+  forkTarget,
+  nativeTurnId,
+  type ForkObservation,
+  type ForkSnapshot,
+} from './session-fork.js';
+import {
   LODY_PLAN_MODE_CONFIG_ID,
   LODY_EXTENSION_METHODS,
   createPlanModeConfigOption,
@@ -32,6 +39,7 @@ import {
   type CancelNotification,
   type CloseSessionRequest,
   type ContentBlock,
+  type ForkSessionRequest,
   type InitializeRequest,
   type InitializeResponse,
   type McpServer,
@@ -80,6 +88,7 @@ export const inject = [
   'llm',
   'permissionPresets',
   'sessionPersistence',
+  'sessions',
   'sessionQuery',
   'sessionTitle',
   'userQuestions',
@@ -154,6 +163,7 @@ type HarnessSessionEvent = {
 };
 
 const LODY_CAPABILITIES = {
+  forkAtTurn: { version: 1 },
   subagentEvents: { version: 1 },
   sessionTitle: { version: 1 },
   compaction: { version: 1 },
@@ -289,7 +299,9 @@ type HarnessContext = {
   agents: {
     create(options: {
       sessionId: string;
-      meta: { cwd: string; agentPreset: string };
+      meta: { cwd: string; agentPreset: string; parentSession?: string; isSeeded?: boolean };
+      seed?: ForkSnapshot['seed'];
+      inheritedEventCount?: number;
       agentOptions: { provider: string; model: string };
       setup(agentContext: HarnessAgentContext): void | Promise<void>;
     }): Promise<HarnessAgentHandle>;
@@ -1245,8 +1257,7 @@ export function apply(ctx: HarnessContext, rawConfig?: DeepSeekAcpAdapterConfig)
         lookup: (name) =>
           (
             agent.ctx.get('tools') as
-              | { get(name: string, scope: HarnessAgent): ToolPresenter | undefined }
-              | undefined
+              { get(name: string, scope: HarnessAgent): ToolPresenter | undefined } | undefined
           )?.get(name, agent),
         content: (block) => assistantBlockToAcp(block as HarnessMessageBlock, attachments),
         emit: async (update) => {
@@ -1315,6 +1326,13 @@ export function apply(ctx: HarnessContext, rawConfig?: DeepSeekAcpAdapterConfig)
     });
   });
 
+  const flushSession = async (session: HarnessSession): Promise<void> => {
+    const store = ctx.get('sessions') as
+      { flush(session: HarnessSession): Promise<boolean> } | undefined;
+    if (!store || !(await store.flush(session)))
+      throw new Error('no session durability listener is available');
+  };
+
   const settleAfterQuiescence = (record: SessionRecord, inflight: InflightPrompt): void => {
     if (inflight.settlementStarted) return;
     inflight.settlementStarted = true;
@@ -1324,6 +1342,9 @@ export function apply(ctx: HarnessContext, rawConfig?: DeepSeekAcpAdapterConfig)
         await record.agent.whenIdle();
         await record.outputTail;
         await record.tools.interrupt();
+        // A fork can run in another ACP process: complete the prompt only
+        // after its terminal native prefix is readable from persistence.
+        await flushSession(record.agent.session);
       }
       if (record.inflight !== inflight) return;
       record.inflight = undefined;
@@ -1547,7 +1568,13 @@ export function apply(ctx: HarnessContext, rawConfig?: DeepSeekAcpAdapterConfig)
               if (!content) continue;
               await notify({
                 sessionId: record.agent.session.id,
-                update: { sessionUpdate: 'agent_message_chunk', content },
+                update: {
+                  sessionUpdate: 'agent_message_chunk',
+                  content,
+                  ...(typeof event.data.turn === 'number'
+                    ? { _meta: { lody: { turnId: nativeTurnId(event.data.turn) } } }
+                    : {}),
+                },
               });
             }
           },
@@ -1604,8 +1631,23 @@ export function apply(ctx: HarnessContext, rawConfig?: DeepSeekAcpAdapterConfig)
   ctx.on(
     'agent/inbox/claimed',
     ({ agent, message, turn }: { agent: HarnessAgent; message: { id: string }; turn: number }) => {
-      const inflight = ownedRecord(agent)?.inflight;
-      if (inflight && inflight.messageId === message.id) inflight.turn = turn;
+      const record = ownedRecord(agent);
+      const inflight = record?.inflight;
+      if (record && inflight && inflight.messageId === message.id) {
+        inflight.turn = turn;
+        enqueueNotification(
+          record,
+          {
+            sessionId: agent.session.id,
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text: '' },
+              _meta: { lody: { turnId: nativeTurnId(turn) } },
+            },
+          },
+          inflight
+        );
+      }
     }
   );
 
@@ -1769,6 +1811,186 @@ export function apply(ctx: HarnessContext, rawConfig?: DeepSeekAcpAdapterConfig)
     return { configOptions: configOptions(record) };
   };
 
+  const createSession = async (
+    params: NewSessionRequest,
+    fork?: ForkSnapshot
+  ): Promise<NewSessionResponseWithModels> => {
+    assertOpen();
+    validateSessionParams(params);
+    let catalog: HarnessModelCatalog;
+    try {
+      catalog = await loadModelCatalog();
+    } catch (error: unknown) {
+      throw internalError(`failed to discover models: ${errorChain(error)}`);
+    }
+    const models = [...catalog.models];
+    const initialSelection = fork?.selection ?? catalog.initialSelection;
+    if (fork?.selection) {
+      const model = await resolveHarnessModel(
+        llm,
+        initialSelection.provider,
+        initialSelection.model
+      );
+      const index = models.findIndex(
+        (candidate) => candidate.provider === model.provider && candidate.id === model.id
+      );
+      if (index < 0) models.push(model);
+      else models[index] = model;
+    }
+    const sessionId = randomUUID();
+    const questions = new UserQuestionBridge(
+      sessionId,
+      (request) => conn.unstable_createElicitation(request),
+      () => questionCapabilities
+    );
+    const initialModel = models.find(
+      (model) => model.provider === initialSelection.provider && model.id === initialSelection.model
+    );
+    if (!initialModel) throw internalError('initial model metadata is unavailable');
+    const reasoningEffort = resolveReasoningEffort(
+      initialModel,
+      fork?.selection ? fork.selection.reasoningEffort : config.reasoningEffort
+    );
+    const selection: ModelSelectionRef = {
+      current: {
+        provider: initialSelection.provider,
+        model: initialSelection.model,
+        ...(reasoningEffort ? { reasoningEffort } : {}),
+      },
+    };
+    const agentPresetOptions = (await ctx.agentPresets.list()).filter(
+      (preset) => preset.broken === undefined
+    );
+    const requestedPreset = fork?.agentPreset ?? ctx.agentPresets.defaultId;
+    if (!agentPresetOptions.some((preset) => preset.id === requestedPreset)) {
+      throw internalError(`default agent preset ${JSON.stringify(requestedPreset)} is unavailable`);
+    }
+    const mcpServerNames = reserveMcpServerNames(
+      params.mcpServers,
+      sessionId,
+      activeMcpServerNames
+    );
+    let mountedPreset = requestedPreset;
+    let handle: HarnessAgentHandle;
+    try {
+      handle = await ctx.agents.create({
+        sessionId,
+        meta: {
+          cwd: params.cwd,
+          agentPreset: requestedPreset,
+          ...(fork ? { parentSession: fork.sourceId, isSeeded: true } : {}),
+        },
+        ...(fork ? { seed: fork.seed, inheritedEventCount: fork.seed.length } : {}),
+        agentOptions: {
+          provider: initialSelection.provider,
+          model: initialSelection.model,
+        },
+        setup: async (agentContext) => {
+          if (subagentEvents && !carrierKeyOf) {
+            const scope = (await agentContext.loader.import('@deepseek-ai/dsh-scope')) as {
+              carrierKeyOf?: (carrier: unknown) => unknown;
+            };
+            if (typeof scope.carrierKeyOf !== 'function')
+              throw new Error('Harness scope identity API is unavailable');
+            carrierKeyOf = scope.carrierKeyOf;
+          }
+          installModelSelection(agentContext, selection);
+          agentContext.on(
+            'user-questions/request',
+            (
+              request: HarnessQuestionRequest & { agent?: HarnessAgent },
+              next: () => Promise<HarnessQuestionAnswer>
+            ) => {
+              // Harness userQuestions.ask owns exact-live/root validation. Only
+              // claim this ACP session's Agent; never answer unowned callers.
+              if (!request.agent || ownedRecord(request.agent)?.questions !== questions)
+                return next();
+              return questions.ask(request);
+            }
+          );
+          mountedPreset = (await ctx.agentPresets.mount(agentContext, requestedPreset)).id;
+          await mountMcpServers(agentContext, params.mcpServers, mcpServerNames.names, params.cwd);
+        },
+      });
+    } catch (error: unknown) {
+      mcpServerNames.release();
+      if (error instanceof RequestError) throw error;
+      throw internalError(`failed to create session: ${errorChain(error)}`);
+    }
+    const dispose = async (): Promise<void> => {
+      questions.cancel();
+      try {
+        await handle.dispose();
+      } finally {
+        mcpServerNames.release();
+      }
+    };
+    if (closed) {
+      await dispose();
+      throw internalError('connection closed during session/new');
+    }
+    let permissionMode: string;
+    let permissionOptions: HarnessPermissionOption[];
+    try {
+      permissionMode = ctx.permissionPresets.current(handle.agent.session);
+      permissionOptions = permissionState(ctx, permissionMode);
+    } catch (error: unknown) {
+      await dispose();
+      throw error;
+    }
+    const record: SessionRecord = {
+      cwd: params.cwd,
+      tools: new ToolCallBridge({
+        cwd: params.cwd,
+        lookup: (name) => {
+          const tools = handle.agent.ctx.get('tools') as
+            { get(name: string, scope: HarnessAgent): ToolPresenter | undefined } | undefined;
+          return tools?.get(name, handle.agent);
+        },
+        content: (block) => assistantBlockToAcp(block as HarnessMessageBlock, attachments),
+        emit: (update) => notify({ sessionId, update }),
+        warn: (message) => ctx.logger.warn(`acp-extension-dsh: ${message}`),
+      }),
+      questions,
+      usage: new HarnessUsageTracker(
+        !baseUrl || /^https:\/\/api\.deepseek\.com(?:\/v1)?\/?$/.test(baseUrl)
+      ),
+      agent: handle.agent,
+      dispose,
+      selection,
+      permissionMode,
+      permissionOptions,
+      agentPreset: mountedPreset,
+      agentPresetOptions,
+      models,
+      started: fork?.seed.some((event) => event.type === 'turn/start') ?? false,
+      outputTail: Promise.resolve(),
+    };
+    if (fork) {
+      try {
+        await flushSession(handle.agent.session);
+        assertOpen();
+      } catch (error: unknown) {
+        let cleanupError: unknown;
+        try {
+          await dispose();
+        } catch (failure: unknown) {
+          cleanupError = failure;
+        }
+        throw internalError(
+          `fork child ${sessionId} could not be committed: ${errorChain(error)}${cleanupError ? `; cleanup: ${errorChain(cleanupError)}` : ''}`
+        );
+      }
+    }
+    sessions.set(sessionId, record);
+    return {
+      sessionId,
+      modes: modeState(record),
+      configOptions: configOptions(record),
+      models: legacyModels(record),
+    };
+  };
+
   const makeAgent = (connection: AgentSideConnection): AcpAgent => {
     conn = connection;
     return {
@@ -1808,7 +2030,7 @@ export function apply(ctx: HarnessContext, rawConfig?: DeepSeekAcpAdapterConfig)
               embeddedContext: false,
             },
             mcpCapabilities: { http: true },
-            sessionCapabilities: { close: {} },
+            sessionCapabilities: { close: {}, fork: {} },
             _meta: { lody: LODY_CAPABILITIES },
           },
           authMethods: [],
@@ -1819,153 +2041,42 @@ export function apply(ctx: HarnessContext, rawConfig?: DeepSeekAcpAdapterConfig)
         return Promise.resolve();
       },
 
-      async newSession(params: NewSessionRequest): Promise<NewSessionResponseWithModels> {
+      newSession(params: NewSessionRequest): Promise<NewSessionResponseWithModels> {
+        return createSession(params);
+      },
+
+      async unstable_forkSession(
+        params: ForkSessionRequest
+      ): Promise<NewSessionResponseWithModels> {
         assertOpen();
-        validateSessionParams(params);
-        let catalog: HarnessModelCatalog;
-        try {
-          catalog = await loadModelCatalog();
-        } catch (error: unknown) {
-          throw internalError(`failed to discover models: ${errorChain(error)}`);
-        }
-        const { models, initialSelection } = catalog;
-        const sessionId = randomUUID();
-        const questions = new UserQuestionBridge(
-          sessionId,
-          (request) => conn.unstable_createElicitation(request),
-          () => questionCapabilities
-        );
-        const initialModel = models.find(
-          (model) =>
-            model.provider === initialSelection.provider && model.id === initialSelection.model
-        );
-        if (!initialModel) throw internalError('initial model metadata is unavailable');
-        const reasoningEffort = resolveReasoningEffort(initialModel, config.reasoningEffort);
-        const selection: ModelSelectionRef = {
-          current: {
-            provider: initialSelection.provider,
-            model: initialSelection.model,
-            ...(reasoningEffort ? { reasoningEffort } : {}),
-          },
-        };
-        const agentPresetOptions = (await ctx.agentPresets.list()).filter(
-          (preset) => preset.broken === undefined
-        );
-        const requestedPreset = ctx.agentPresets.defaultId;
-        if (!agentPresetOptions.some((preset) => preset.id === requestedPreset)) {
-          throw internalError(
-            `default agent preset ${JSON.stringify(requestedPreset)} is unavailable`
-          );
-        }
-        const mcpServerNames = reserveMcpServerNames(
-          params.mcpServers,
-          sessionId,
-          activeMcpServerNames
-        );
-        let mountedPreset = requestedPreset;
-        let handle: HarnessAgentHandle;
-        try {
-          handle = await ctx.agents.create({
-            sessionId,
-            meta: { cwd: params.cwd, agentPreset: requestedPreset },
-            agentOptions: {
-              provider: initialSelection.provider,
-              model: initialSelection.model,
-            },
-            setup: async (agentContext) => {
-              if (subagentEvents && !carrierKeyOf) {
-                const scope = (await agentContext.loader.import('@deepseek-ai/dsh-scope')) as {
-                  carrierKeyOf?: (carrier: unknown) => unknown;
-                };
-                if (typeof scope.carrierKeyOf !== 'function')
-                  throw new Error('Harness scope identity API is unavailable');
-                carrierKeyOf = scope.carrierKeyOf;
-              }
-              installModelSelection(agentContext, selection);
-              agentContext.on(
-                'user-questions/request',
-                (
-                  request: HarnessQuestionRequest & { agent?: HarnessAgent },
-                  next: () => Promise<HarnessQuestionAnswer>
-                ) => {
-                  // Harness userQuestions.ask owns exact-live/root validation. Only
-                  // claim this ACP session's Agent; never answer unowned callers.
-                  if (!request.agent || ownedRecord(request.agent)?.questions !== questions)
-                    return next();
-                  return questions.ask(request);
-                }
-              );
-              mountedPreset = (await ctx.agentPresets.mount(agentContext, requestedPreset)).id;
-              await mountMcpServers(
-                agentContext,
-                params.mcpServers,
-                mcpServerNames.names,
-                params.cwd
-              );
-            },
-          });
-        } catch (error: unknown) {
-          mcpServerNames.release();
-          if (error instanceof RequestError) throw error;
-          throw internalError(`failed to create session: ${errorChain(error)}`);
-        }
-        const dispose = async (): Promise<void> => {
-          questions.cancel();
-          try {
-            await handle.dispose();
-          } finally {
-            mcpServerNames.release();
-          }
-        };
-        if (closed) {
-          await dispose();
-          throw internalError('connection closed during session/new');
-        }
-        let permissionMode: string;
-        let permissionOptions: HarnessPermissionOption[];
-        try {
-          permissionMode = ctx.permissionPresets.current(handle.agent.session);
-          permissionOptions = permissionState(ctx, permissionMode);
-        } catch (error: unknown) {
-          await dispose();
-          throw error;
-        }
-        const record: SessionRecord = {
+        const target = forkTarget(params._meta);
+        const creation = {
           cwd: params.cwd,
-          tools: new ToolCallBridge({
-            cwd: params.cwd,
-            lookup: (name) => {
-              const tools = handle.agent.ctx.get('tools') as
-                | { get(name: string, scope: HarnessAgent): ToolPresenter | undefined }
-                | undefined;
-              return tools?.get(name, handle.agent);
-            },
-            content: (block) => assistantBlockToAcp(block as HarnessMessageBlock, attachments),
-            emit: (update) => notify({ sessionId, update }),
-            warn: (message) => ctx.logger.warn(`acp-extension-dsh: ${message}`),
-          }),
-          questions,
-          usage: new HarnessUsageTracker(
-            !baseUrl || /^https:\/\/api\.deepseek\.com(?:\/v1)?\/?$/.test(baseUrl)
-          ),
-          agent: handle.agent,
-          dispose,
-          selection,
-          permissionMode,
-          permissionOptions,
-          agentPreset: mountedPreset,
-          agentPresetOptions,
-          models,
-          started: false,
-          outputTail: Promise.resolve(),
+          mcpServers: params.mcpServers ?? [],
+          additionalDirectories: params.additionalDirectories,
         };
-        sessions.set(sessionId, record);
-        return {
-          sessionId,
-          modes: modeState(record),
-          configOptions: configOptions(record),
-          models: legacyModels(record),
-        };
+        validateSessionParams(creation);
+        const query = ctx.get('sessionQuery') as
+          | {
+              observeSession(id: string): Promise<ForkObservation>;
+            }
+          | undefined;
+        if (!query) throw internalError('Harness session query is unavailable');
+        let source: ForkObservation;
+        try {
+          source = await query.observeSession(params.sessionId);
+        } catch (error: unknown) {
+          throw invalidParams(`fork source unavailable: ${errorChain(error)}`);
+        }
+        let snapshot: ForkSnapshot;
+        try {
+          if (source.header.id !== params.sessionId)
+            throw invalidParams('fork source identity mismatch');
+          snapshot = forkSnapshot(source, target);
+        } finally {
+          source[Symbol.dispose]();
+        }
+        return createSession(creation, snapshot);
       },
 
       setSessionMode(params: SetSessionModeRequest): void {

@@ -51,15 +51,10 @@ Harness. Keep it usable without importing Lody packages.
   Keep the SQLite session-query service mounted with `openAt: never`: this ACP
   composition needs its exact-read contract but exposes no full-text search,
   and public Node builds do not reliably include SQLite FTS5.
-  The `0.1.5-rc.2` package family cold-installs under npm 10 with the complete
-  same-version closure. Keep the closure exact and do not add `--force` or
-  `--legacy-peer-deps`; either would hide a future peer-graph regression. The
-  Cordis-ecosystem entries in `DEEPSEEK_HARNESS_CORDIS_PACKAGE_VERSIONS` are the
-  exception: they publish on their own release lines, so the launcher must
-  install them from `createDeepSeekHarnessNpxSpecifiers()` instead of appending
-  `DEEPSEEK_HARNESS_VERSION`. Requesting one at the Harness release fails the
-  cold install with `ETARGET`, so never "simplify" the closure back to a single
-  version.
+  Keep the npm-10-compatible `0.1.5-rc.2` closure exact; never use `--force` or
+  `--legacy-peer-deps`. Cordis-ecosystem versions are independent: use
+  `createDeepSeekHarnessNpxSpecifiers()` and its
+  `DEEPSEEK_HARNESS_CORDIS_PACKAGE_VERSIONS`, never append the Harness version.
 - `src/capabilities.ts` metadata is authoritative for built-in preset labels exposed
   through ACP. Harness runtime metadata remains authoritative for user presets.
 - Hosts own installation caches, data-directory selection, process supervision,
@@ -72,20 +67,15 @@ Harness. Keep it usable without importing Lody packages.
   and preserve additive multi-select custom text only after Core answer-notes
   negotiation. Plan-review intent changes presentation, not Plan or permissions.
 
-The profile and adapter must change together when a selector or Harness service
-contract changes. Credentials must remain in the host environment and must never
-be rendered into a generated profile.
+Change profile and adapter together for selector/service changes. Keep credentials
+in the host environment, never generated profiles.
 
-ACP MCP server names become Harness tool namespaces. Preserve an already-valid,
-available name; normalize invalid names and suffix concurrent collisions so two
-live ACP sessions cannot contend for the native client's process-global namespace.
+Preserve valid available ACP MCP names; normalize invalid names and suffix
+collisions in Harness's process-global tool namespace.
 MCP plugin fibers belong to the Agent context and must settle before `session/new`
 returns, so failed startup cannot publish a session without its requested tools.
-Forward `assistant/chunk` reasoning deltas immediately as ACP thought chunks and emit
-`\n\n` when their reasoning block ends, matching Lody's semantic thought-section
-separator. Harness may retry after emitting them, and the adapter intentionally does
-not retract or deduplicate those already-visible thoughts; do not replay final reasoning
-blocks.
+Forward reasoning deltas immediately as ACP thoughts, ending blocks with `\n\n`.
+Do not retract/deduplicate retry thoughts or replay final reasoning blocks.
 Translate Harness's durable `compaction/start` / `compaction/end` bracket into one
 standard ACP tool-call lifecycle. Compaction meaning belongs only in the shared
 `_meta.lody.activity` contract from `acp-extension-core`; manual compaction has a
@@ -122,9 +112,16 @@ upgrade a first-message preview to a generated title.
 - Core subagent events require negotiation and native carrier ancestry; child
   permissions retain run attribution. See README for stream limits.
 
-`dist/` is generated, not committed; `prepare` runs `npm run build` during
-install so workspace consumers can resolve the `./dist/*` runtime exports. Keep
-that hook when changing the build.
+Do not commit generated `dist/`. Retain the `prepare` build hook so consumers
+resolve `./dist/*` after installation.
 
 Run `npm run build`, `npm test`, and `npm run format:check` before publishing a
 change. Node.js 22 or newer is required.
+
+## Session forks
+
+Use Core `forkAtTurn`/`turnId` and native event prefixes through exact ended turns.
+Never round unknown targets, copy open tails, replay a transcript prompt, or alter
+source runtime/files. Preserve target cwd/MCP; flush ended prompts and children before success.
+Release failed children and identify any possible stored artifact in the error.
+See README for scope and native validation.
