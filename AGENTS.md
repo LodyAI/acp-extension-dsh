@@ -47,10 +47,8 @@ Provider-owned ACP/Harness boundary. Keep it usable without importing Lody packa
   Keep the SQLite session-query service mounted with `openAt: never`: this ACP
   composition needs its exact-read contract but exposes no full-text search,
   and public Node builds do not reliably include SQLite FTS5.
-  Keep the npm-10-compatible `0.2.0-rc.2` closure exact; never use `--force` or
-  `--legacy-peer-deps`. Cordis-ecosystem versions are independent: use
-  `createDeepSeekHarnessNpxSpecifiers()` and its
-  `DEEPSEEK_HARNESS_CORDIS_PACKAGE_VERSIONS`, never append the Harness version.
+  Use createDeepSeekHarnessNpxSpecifiers(); keep Cordis versions independent.
+  Never force npm peer resolution.
 - `src/capabilities.ts` metadata is authoritative for built-in preset labels exposed
   through ACP. Harness runtime metadata remains authoritative for user presets.
 - Hosts own installation caches, data-directory selection, process supervision,
@@ -65,6 +63,11 @@ Provider-owned ACP/Harness boundary. Keep it usable without importing Lody packa
 
 Change profile and adapter together for selector/service changes. Keep credentials
 in the host environment, never generated profiles.
+
+Core controls must retain ACP prompt ownership across goals and steering.
+History queries never activate writers. Project metadata never changes cwd or
+permissions. Force quiet job completion at preset registration; never admit
+unowned root steps. Per-run query/cancel support follows actual local ownership.
 
 Preserve valid available ACP MCP names; normalize invalid names and suffix
 collisions in Harness's process-global tool namespace.

@@ -20,7 +20,7 @@ export const ACP_EXTENSION_DSH_VERSION = '0.2.0';
 export const DEEPSEEK_HARNESS_VERSION = '0.2.0-rc.2';
 export const DEEPSEEK_HARNESS_PI_AI_VERSION = '0.87.1';
 export const DEEPSEEK_HARNESS_SCHEMASTERY_VERSION = '3.18.4';
-export const ACP_EXTENSION_DSH_PROFILE_REVISION = 'v17';
+export const ACP_EXTENSION_DSH_PROFILE_REVISION = 'v18';
 export const ACP_EXTENSION_DSH_SESSION_ROOT_ENV = 'ACP_EXTENSION_DSH_SESSION_ROOT';
 export const ACP_EXTENSION_DSH_QUERY_PATH_ENV = 'ACP_EXTENSION_DSH_QUERY_PATH';
 export const DEEPSEEK_HARNESS_DEFAULT_SESSION_COMPRESSION = 'zstd';
@@ -596,6 +596,7 @@ ${permissionPresets}
       config:
         presetRoot: ${JSON.stringify(config.presetRoot)}
         settingsPath: !!js dshHomePath('settings.yaml')
+        projectMetadataRoot: !!js dshHomePath('lody-projects')
         userPresetRoot: !!js dshHomePath('.agent-presets')
         provider: ${JSON.stringify(provider)}
         model: ${JSON.stringify(model)}${config.reasoningEffort ? `\n        reasoningEffort: ${JSON.stringify(config.reasoningEffort)}` : ''}

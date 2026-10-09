@@ -942,6 +942,14 @@ describe('DeepSeek Harness ACP adapter', () => {
         forkAtTurn: { version: 1 },
         compaction: { version: 1 },
         usage: { version: 1 },
+        sessionHistory: { version: 1 },
+        steering: {
+          version: 1,
+          transport: 'request',
+          upstreamTurn: 'same',
+          configPolicy: 'active',
+        },
+        subagents: { version: 1, lifecycle: true, list: true, output: true, cancel: true },
         sessionTitle: { version: 1 },
         subagentEvents: { version: 1 },
       },
@@ -1779,7 +1787,20 @@ describe('DeepSeek Harness ACP adapter', () => {
       currentAgent: () => createdAgent!,
       approval: globalListeners.get('approval/request')!,
       spawnChild: (id: string, nativeId: string, parent = createdAgent!) => {
-        const agent = { ...createdAgent!, id, session: { id, header: { id } } };
+        const agent = {
+          ...createdAgent!,
+          id,
+          session: { id, header: { id } },
+          cancel() {
+            globalListeners.get('subagent/end')!({
+              id,
+              runId: nativeId,
+              provider: 'spawn',
+              local: true,
+              stopReason: 'aborted',
+            });
+          },
+        };
         childAgents.set(id, agent);
         globalListeners
           .get('subagent/start')!
@@ -1846,8 +1867,54 @@ describe('DeepSeek Harness ACP adapter', () => {
       snapshot: { parentRunId: null, support: { stream: ['text', 'thought', 'tool'] } },
     });
     expect(events[3]).toMatchObject({ snapshot: { parentRunId: events[0].runId } });
+    const roster = await h.client.extMethod('_lody/subagents/list', {
+      sessionId: h.session.sessionId,
+    });
+    expect(roster.tasks).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ taskId: events[0].runId, status: 'completed' }),
+        expect.objectContaining({ taskId: events[3].runId, status: 'running' }),
+      ])
+    );
+    expect((roster.tasks as unknown[]).length).toBe(2);
+    expect(
+      await h.client.extMethod('_lody/subagents/output', {
+        sessionId: h.session.sessionId,
+        taskId: events[0].runId,
+      })
+    ).toEqual({ output: 'Found it\n' });
+    await expect(
+      h.client.extMethod('_lody/subagents/output', {
+        sessionId: h.session.sessionId,
+        taskId: 'native-foreign',
+      })
+    ).rejects.toThrow('unknown subagent');
+    expect(
+      await h.client.extMethod('_lody/subagents/list', {
+        sessionId: h.session.sessionId,
+        activeOnly: true,
+      })
+    ).toEqual({ tasks: [expect.objectContaining({ taskId: events[3].runId })] });
+
     expect(updates.filter((value) => value.update.sessionUpdate === 'agent_message_chunk')).toEqual(
       []
+    );
+    await h.client.extMethod('_lody/subagents/cancel', {
+      sessionId: h.session.sessionId,
+      taskId: events[3].runId,
+    });
+    expect(
+      await h.client.extMethod('_lody/subagents/list', {
+        sessionId: h.session.sessionId,
+        activeOnly: true,
+      })
+    ).toEqual({ tasks: [] });
+    expect(
+      (await h.client.extMethod('_lody/subagents/list', { sessionId: h.session.sessionId })).tasks
+    ).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ taskId: events[3].runId, status: 'killed' }),
+      ])
     );
   });
 

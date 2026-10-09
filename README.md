@@ -16,8 +16,10 @@ committed assistant messages, live reasoning and the existing rich tool projecti
 non-local runs expose lifecycle and final summaries only. Scope-carrier identity,
 not tool titles, establishes ancestry. Child approvals keep run-scoped tool IDs on
 the root ACP connection; delegated questionnaires remain outside the root bridge.
-Normalized runs offer no cancellation/output query controls. Existing clients are
-unchanged. Core 0.1.9 supplies the subagent event contract and helper.
+Core subagent list/output requests address the emitted run IDs and never expose
+foreign sessions. Local runs support cancellation; remote runs expose final output
+only and reject cancellation. Queries retain runs observed during this activation,
+not a reconstructed historical roster. Core 0.1.9 supplies the shared contracts.
 
 The adapter advertises Core's `_meta.lody.compaction` capability and translates
 Harness `compaction/start` and `compaction/end` events into a standard ACP tool
@@ -337,3 +339,47 @@ the current runtime, checking that historical artifacts remain byte-identical.
 The settings/profile probe also checks load after close with a retained model and
 permission preset. Real remote models, full subagent-history replay and file rollback
 are not part of these tests.
+
+## Core controls
+
+The generated Harness 0.2.0-rc.2 profile (v18) exposes Core sessionHistory,
+steering, subagents, goal, tasks.background and worktreeProject in addition to
+forkAtTurn, subagentEvents, sessionTitle, compaction and cumulative usage.
+Goal, task and project declarations require their backing service/configuration.
+
+- `session/list` discovers root sessions. `_lody/session/history/read` replays a
+  nonactivated session through an immutable query observation, without writer
+  locks, resume, recovery writes or model calls. History imports prefer this
+  advertised method. Subagent history remains outside the root transcript.
+- `_lody/session/steer` accepts input only during an owned active native turn.
+  Non-waking injection preserves the active request configuration. Durable
+  consumption produces `steer_applied`; rejected/cancelled/idle input cannot
+  silently become another turn. Unsupported request content fails validation.
+- Goal set/resume use prompt `goalControl`; native automatic rounds retain the
+  same ACP prompt until completion, pause, blocking or disarm. Pause/clear use
+  `_lody/session/goal`. Cancel pauses the goal. Native round exhaustion maps to
+  `limited`; no token-budget or elapsed-usage values are invented. Fallback
+  prompt text is ignored for these native controls.
+- Background jobs project owner-scoped task lifecycle without reading the
+  model's output cursor. Preset registration sets native job completion delivery
+  to `quiet`; idle notifications wait for later owned input. Retry waits use Core
+  activity metadata. Standard `usage_update` reports current context pressure,
+  independently of cumulative Core token accounting.
+- `worktreeProject` validates an existing absolute directory and persists an
+  atomic catalog sidecar under `$DSH_HOME/lody-projects`. Listing by original
+  project includes its worktree sessions while preserving each actual `cwd`.
+  Forks inherit the association unless overridden. No execution/permission path
+  uses this metadata; missing metadata retains ordinary cwd association.
+
+Task/output requests require an active root session. Output is a bounded text tail
+(100,000 characters); `tail` limits returned lines. Each run advertises its actual
+stream/output/cancel support. Restored sessions begin a new observed-run roster.
+No account rate-limit windows are available from the API-key composition, and the
+experimental schedule bundle starts independent turns without an ACP ownership
+transport. `rateLimits` and `tasks.scheduled` therefore remain unadvertised.
+
+Native behavioral probe (synthetic model and isolated storage):
+
+```sh
+DSH_TEST_RUNTIME_ROOT=/path/to/pinned/node_modules node --test scripts/core-capabilities-smoke.mjs
+```
