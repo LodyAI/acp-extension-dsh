@@ -10,6 +10,7 @@ import {
   LODY_EXTENSION_METHODS,
   createPlanModeConfigOption,
 } from 'acp-extension-core';
+import { replaySessionHistory, restoredSelection } from './session-history.js';
 import { ToolCallBridge, type ToolPresenter } from './tool-calls.js';
 import { HarnessUsageTracker, type HarnessTokenUsage } from './usage.js';
 import {
@@ -42,6 +43,8 @@ import {
   type ForkSessionRequest,
   type InitializeRequest,
   type InitializeResponse,
+  type LoadSessionRequest,
+  type ResumeSessionRequest,
   type McpServer,
   type NewSessionRequest,
   type NewSessionResponse,
@@ -172,7 +175,9 @@ const LODY_CAPABILITIES = {
 
 type HarnessSession = {
   id: string;
-  header: { id: string };
+  header: { id: string; cwd?: string; origin?: string; agentPreset?: string };
+  snapshotEvents(): ForkSnapshot['seed'];
+  append(type: 'model/selection', data: ModelSelection): unknown;
 };
 
 type HarnessAgent = {
@@ -304,6 +309,10 @@ type HarnessContext = {
       inheritedEventCount?: number;
       agentOptions: { provider: string; model: string };
       setup(agentContext: HarnessAgentContext): void | Promise<void>;
+    }): Promise<HarnessAgentHandle>;
+    resume(options: {
+      resumeSessionId: string;
+      setup(agentContext: HarnessAgentContext, agent: HarnessAgent): Promise<void>;
     }): Promise<HarnessAgentHandle>;
     get(sessionId: string): HarnessAgent | undefined;
   };
@@ -1786,7 +1795,10 @@ export function apply(ctx: HarnessContext, rawConfig?: DeepSeekAcpAdapterConfig)
             model: selected.model,
             ...(reasoningEffort ? { reasoningEffort } : {}),
           };
-          return { configOptions: configOptions(record) };
+          record.agent.session.append('model/selection', record.selection.current);
+          return flushSession(record.agent.session).then(() => ({
+            configOptions: configOptions(record),
+          }));
         })
         .catch((error: unknown) => {
           if (error instanceof RequestError) throw error;
@@ -1805,6 +1817,10 @@ export function apply(ctx: HarnessContext, rawConfig?: DeepSeekAcpAdapterConfig)
         ...record.selection.current,
         reasoningEffort,
       };
+      record.agent.session.append('model/selection', record.selection.current);
+      return flushSession(record.agent.session).then(() => ({
+        configOptions: configOptions(record),
+      }));
     } else {
       throw invalidParams(`unknown config option: ${params.configId}`);
     }
@@ -1813,7 +1829,8 @@ export function apply(ctx: HarnessContext, rawConfig?: DeepSeekAcpAdapterConfig)
 
   const createSession = async (
     params: NewSessionRequest,
-    fork?: ForkSnapshot
+    fork?: ForkSnapshot,
+    restore?: { sessionId: string; replay: boolean }
   ): Promise<NewSessionResponseWithModels> => {
     assertOpen();
     validateSessionParams(params);
@@ -1837,7 +1854,7 @@ export function apply(ctx: HarnessContext, rawConfig?: DeepSeekAcpAdapterConfig)
       if (index < 0) models.push(model);
       else models[index] = model;
     }
-    const sessionId = randomUUID();
+    const sessionId = restore?.sessionId ?? randomUUID();
     const questions = new UserQuestionBridge(
       sessionId,
       (request) => conn.unstable_createElicitation(request),
@@ -1861,8 +1878,9 @@ export function apply(ctx: HarnessContext, rawConfig?: DeepSeekAcpAdapterConfig)
     const agentPresetOptions = (await ctx.agentPresets.list()).filter(
       (preset) => preset.broken === undefined
     );
-    const requestedPreset = fork?.agentPreset ?? ctx.agentPresets.defaultId;
-    if (!agentPresetOptions.some((preset) => preset.id === requestedPreset)) {
+    let requestedPreset = fork?.agentPreset ?? ctx.agentPresets.defaultId;
+    let restoredEvents: ForkSnapshot['seed'] = [];
+    if (!restore && !agentPresetOptions.some((preset) => preset.id === requestedPreset)) {
       throw internalError(`default agent preset ${JSON.stringify(requestedPreset)} is unavailable`);
     }
     const mcpServerNames = reserveMcpServerNames(
@@ -1873,49 +1891,90 @@ export function apply(ctx: HarnessContext, rawConfig?: DeepSeekAcpAdapterConfig)
     let mountedPreset = requestedPreset;
     let handle: HarnessAgentHandle;
     try {
-      handle = await ctx.agents.create({
-        sessionId,
-        meta: {
-          cwd: params.cwd,
-          agentPreset: requestedPreset,
-          ...(fork ? { parentSession: fork.sourceId, isSeeded: true } : {}),
-        },
-        ...(fork ? { seed: fork.seed, inheritedEventCount: fork.seed.length } : {}),
-        agentOptions: {
-          provider: initialSelection.provider,
-          model: initialSelection.model,
-        },
-        setup: async (agentContext) => {
-          if (subagentEvents && !carrierKeyOf) {
-            const scope = (await agentContext.loader.import('@deepseek-ai/dsh-scope')) as {
-              carrierKeyOf?: (carrier: unknown) => unknown;
-            };
-            if (typeof scope.carrierKeyOf !== 'function')
-              throw new Error('Harness scope identity API is unavailable');
-            carrierKeyOf = scope.carrierKeyOf;
+      const setup = async (agentContext: HarnessAgentContext, restoredAgent?: HarnessAgent) => {
+        if (restore) {
+          if (!restoredAgent || restoredAgent.session.id !== sessionId)
+            throw internalError('native resume returned a different session');
+          const session = restoredAgent.session;
+          if (session.header.origin === 'subagent')
+            throw invalidParams('subagent sessions cannot be resumed as ACP root sessions');
+          if (session.header.cwd !== params.cwd)
+            throw invalidParams('resume cwd must match the persisted session cwd');
+          // Inspect the repaired log under the native writer claim, not a stale query snapshot.
+          restoredEvents = structuredClone(session.snapshotEvents());
+          requestedPreset =
+            ([...restoredEvents]
+              .reverse()
+              .find(
+                (event) =>
+                  event.type === 'agent-preset/selected' &&
+                  typeof event.data.agentPreset === 'string'
+              )?.data.agentPreset as string | undefined) ??
+            session.header.agentPreset ??
+            ctx.agentPresets.defaultId;
+          if (!agentPresetOptions.some((preset) => preset.id === requestedPreset))
+            throw invalidParams('persisted agent preset is unavailable');
+          const restoredModel = restoredSelection(restoredEvents);
+          if (restoredModel) {
+            const model = await resolveHarnessModel(
+              llm,
+              restoredModel.provider,
+              restoredModel.model
+            );
+            const index = models.findIndex(
+              (candidate) => candidate.provider === model.provider && candidate.id === model.id
+            );
+            if (index < 0) models.push(model);
+            else models[index] = model;
+            selection.current = restoredModel;
+            if (restoredModel.reasoningEffort)
+              resolveReasoningEffort(model, restoredModel.reasoningEffort);
           }
-          installModelSelection(agentContext, selection);
-          agentContext.on(
-            'user-questions/request',
-            (
-              request: HarnessQuestionRequest & { agent?: HarnessAgent },
-              next: () => Promise<HarnessQuestionAnswer>
-            ) => {
-              // Harness userQuestions.ask owns exact-live/root validation. Only
-              // claim this ACP session's Agent; never answer unowned callers.
-              if (!request.agent || ownedRecord(request.agent)?.questions !== questions)
-                return next();
-              return questions.ask(request);
-            }
-          );
-          mountedPreset = (await ctx.agentPresets.mount(agentContext, requestedPreset)).id;
-          await mountMcpServers(agentContext, params.mcpServers, mcpServerNames.names, params.cwd);
-        },
-      });
+        }
+        if (subagentEvents && !carrierKeyOf) {
+          const scope = (await agentContext.loader.import('@deepseek-ai/dsh-scope')) as {
+            carrierKeyOf?: (carrier: unknown) => unknown;
+          };
+          if (typeof scope.carrierKeyOf !== 'function')
+            throw new Error('Harness scope identity API is unavailable');
+          carrierKeyOf = scope.carrierKeyOf;
+        }
+        installModelSelection(agentContext, selection);
+        agentContext.on(
+          'user-questions/request',
+          (
+            request: HarnessQuestionRequest & { agent?: HarnessAgent },
+            next: () => Promise<HarnessQuestionAnswer>
+          ) => {
+            // Harness userQuestions.ask owns exact-live/root validation. Only
+            // claim this ACP session's Agent; never answer unowned callers.
+            if (!request.agent || ownedRecord(request.agent)?.questions !== questions)
+              return next();
+            return questions.ask(request);
+          }
+        );
+        mountedPreset = (await ctx.agentPresets.mount(agentContext, requestedPreset)).id;
+        await mountMcpServers(agentContext, params.mcpServers, mcpServerNames.names, params.cwd);
+      };
+      handle = restore
+        ? await ctx.agents.resume({ resumeSessionId: sessionId, setup })
+        : await ctx.agents.create({
+            sessionId,
+            meta: {
+              cwd: params.cwd,
+              agentPreset: requestedPreset,
+              ...(fork ? { parentSession: fork.sourceId, isSeeded: true } : {}),
+            },
+            ...(fork ? { seed: fork.seed, inheritedEventCount: fork.seed.length } : {}),
+            agentOptions: { provider: initialSelection.provider, model: initialSelection.model },
+            setup,
+          });
     } catch (error: unknown) {
       mcpServerNames.release();
       if (error instanceof RequestError) throw error;
-      throw internalError(`failed to create session: ${errorChain(error)}`);
+      throw internalError(
+        `failed to ${restore ? 'resume' : 'create'} session: ${errorChain(error)}`
+      );
     }
     const dispose = async (): Promise<void> => {
       questions.cancel();
@@ -1927,7 +1986,7 @@ export function apply(ctx: HarnessContext, rawConfig?: DeepSeekAcpAdapterConfig)
     };
     if (closed) {
       await dispose();
-      throw internalError('connection closed during session/new');
+      throw internalError('connection closed during session establishment');
     }
     let permissionMode: string;
     let permissionOptions: HarnessPermissionOption[];
@@ -1948,7 +2007,10 @@ export function apply(ctx: HarnessContext, rawConfig?: DeepSeekAcpAdapterConfig)
           return tools?.get(name, handle.agent);
         },
         content: (block) => assistantBlockToAcp(block as HarnessMessageBlock, attachments),
-        emit: (update) => notify({ sessionId, update }),
+        emit: (update) =>
+          restore?.replay && !sessions.has(sessionId)
+            ? conn.sessionUpdate({ sessionId, update })
+            : notify({ sessionId, update }),
         warn: (message) => ctx.logger.warn(`acp-extension-dsh: ${message}`),
       }),
       questions,
@@ -1963,11 +2025,14 @@ export function apply(ctx: HarnessContext, rawConfig?: DeepSeekAcpAdapterConfig)
       agentPreset: mountedPreset,
       agentPresetOptions,
       models,
-      started: fork?.seed.some((event) => event.type === 'turn/start') ?? false,
+      started:
+        (restore ? restoredEvents : fork?.seed)?.some((event) => event.type === 'turn/start') ??
+        false,
       outputTail: Promise.resolve(),
     };
-    if (fork) {
+    if (!restore) {
       try {
+        if (!fork) handle.agent.session.append('model/selection', selection.current);
         await flushSession(handle.agent.session);
         assertOpen();
       } catch (error: unknown) {
@@ -1978,8 +2043,26 @@ export function apply(ctx: HarnessContext, rawConfig?: DeepSeekAcpAdapterConfig)
           cleanupError = failure;
         }
         throw internalError(
-          `fork child ${sessionId} could not be committed: ${errorChain(error)}${cleanupError ? `; cleanup: ${errorChain(cleanupError)}` : ''}`
+          `${fork ? 'fork child' : 'session'} ${sessionId} could not be committed: ${errorChain(error)}${cleanupError ? `; cleanup: ${errorChain(cleanupError)}` : ''}`
         );
+      }
+    }
+    if (restore) {
+      try {
+        await replaySessionHistory(restoredEvents, {
+          sessionId,
+          replay: restore.replay,
+          tools: record.tools,
+          usage: record.usage,
+          content: (block) => assistantBlockToAcp(block as HarnessMessageBlock, attachments),
+          emit: async (update) => {
+            await conn.sessionUpdate({ sessionId, update });
+          },
+        });
+        assertOpen();
+      } catch (error: unknown) {
+        await dispose();
+        throw internalError(`failed to restore session history: ${errorChain(error)}`);
       }
     }
     sessions.set(sessionId, record);
@@ -1989,6 +2072,31 @@ export function apply(ctx: HarnessContext, rawConfig?: DeepSeekAcpAdapterConfig)
       configOptions: configOptions(record),
       models: legacyModels(record),
     };
+  };
+
+  const restoring = new Set<string>();
+  const restoreSession = async (
+    params: LoadSessionRequest | ResumeSessionRequest,
+    replay: boolean
+  ) => {
+    assertOpen();
+    if (
+      sessions.has(params.sessionId) ||
+      restoring.has(params.sessionId) ||
+      ctx.agents.get(params.sessionId)
+    )
+      throw invalidParams('session is already active or being restored');
+    restoring.add(params.sessionId);
+    try {
+      const { sessionId: _sessionId, ...response } = await createSession(
+        { ...params, mcpServers: params.mcpServers ?? [] },
+        undefined,
+        { sessionId: params.sessionId, replay }
+      );
+      return response;
+    } finally {
+      restoring.delete(params.sessionId);
+    }
   };
 
   const makeAgent = (connection: AgentSideConnection): AcpAgent => {
@@ -2030,7 +2138,8 @@ export function apply(ctx: HarnessContext, rawConfig?: DeepSeekAcpAdapterConfig)
               embeddedContext: false,
             },
             mcpCapabilities: { http: true },
-            sessionCapabilities: { close: {}, fork: {} },
+            loadSession: true,
+            sessionCapabilities: { close: {}, fork: {}, resume: {} },
             _meta: { lody: LODY_CAPABILITIES },
           },
           authMethods: [],
@@ -2043,6 +2152,14 @@ export function apply(ctx: HarnessContext, rawConfig?: DeepSeekAcpAdapterConfig)
 
       newSession(params: NewSessionRequest): Promise<NewSessionResponseWithModels> {
         return createSession(params);
+      },
+
+      loadSession(params: LoadSessionRequest) {
+        return restoreSession(params, true);
+      },
+
+      resumeSession(params: ResumeSessionRequest) {
+        return restoreSession(params, false);
       },
 
       async unstable_forkSession(

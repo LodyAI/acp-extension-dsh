@@ -275,7 +275,7 @@ durability checkpoint. Failures release
 the child runtime and MCP reservations; a failed checkpoint error identifies
 the child ID because Harness offers no public deletion operation for a stored
 artifact. Forking does not restore project files or create a Git worktree.
-ACP load/resume remains outside this feature.
+Session restoration is described below; fork still creates a separate native identity.
 
 `npm test` covers ACP routing, capabilities, exact prefixes, configuration,
 failure paths and the durability barrier. The optional native event-store check
@@ -289,3 +289,39 @@ DSH_TEST_RUNTIME_ROOT=/absolute/runtime/node_modules node --test scripts/session
 It verifies prefix reconstruction, compaction surface replacements, source
 isolation and serialized restoration. It does not exercise actual JSONL/zstd
 restart, model continuation, or the compaction model/plugin.
+
+## Session restoration
+
+The adapter advertises `loadSession: true` and `sessionCapabilities.resume: {}`.
+Both `session/load` and `session/resume` use Harness `agents.resume` with the original
+session ID. Harness owns writer locking, disk reconstruction and interrupted-turn
+repair. The adapter requires the persisted cwd, rejects delegated subagent identities
+and duplicate activation, restores the Agent preset and model/reasoning selection,
+and waits for every requested ACP MCP server before returning configuration.
+Missing sessions, unavailable configuration, and setup failures are errors; no fresh
+session or transcript-prompt fallback is created by the adapter.
+
+Load emits the root session's user messages, assistant text/reasoning/images, tool
+lifecycles and titles in log order before its response. Synthetic injected user context
+is not presented as a human message; child-agent transcripts are not reconstructed.
+Missing historical images fail load and release the runtime; resume can still proceed
+because it emits no history. Both paths rebuild usage without emitting historical
+usage increments. The next usage delta contains only new work.
+
+New sessions checkpoint their initial model selection. Model/reasoning changes are
+recorded and flushed even before the next prompt, so a restart preserves that choice.
+Existing logs without a selection use their last request header, or the configured
+default for a blank legacy session. Preset changes remain forbidden after a turn starts.
+
+The native restoration probe runs separate processes over real JSONL and zstd storage,
+with a synthetic model and preset composition. It verifies original identity, interrupted
+turn repair, ordered load replay, silent resume, continued model context and usage:
+
+```sh
+npm run build
+DSH_TEST_RUNTIME_ROOT=/absolute/runtime/node_modules node --test scripts/session-restore-smoke.mjs
+```
+
+The settings/profile probe also checks load after close with a retained model and
+permission preset. Real remote models, full subagent-history replay and file rollback
+are not part of these tests.

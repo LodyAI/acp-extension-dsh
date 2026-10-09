@@ -1,7 +1,6 @@
 # acp-extension-dsh contributor guide
 
-This package is the provider-owned integration boundary between ACP and DeepSeek
-Harness. Keep it usable without importing Lody packages.
+Provider-owned ACP/Harness boundary. Keep it usable without importing Lody packages.
 
 ## Ownership
 
@@ -125,3 +124,8 @@ Never round unknown targets, copy open tails, replay a transcript prompt, or alt
 source runtime/files. Preserve target cwd/MCP; flush ended prompts and children before success.
 Release failed children and identify any possible stored artifact in the error.
 See README for scope and native validation.
+
+## Session restoration
+
+Use native resume with original ID/cwd and fresh MCP; reject subagents/duplicate
+activation and clean up failures. Load replays history, resume does not. See README.

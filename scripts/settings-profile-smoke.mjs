@@ -148,6 +148,23 @@ for (const fixture of cases) {
             )
           );
         }
+        await connection.setSessionConfigOption({
+          sessionId: session.sessionId,
+          configId: 'model',
+          value: target.value,
+        });
+        await connection.setSessionMode({ sessionId: session.sessionId, modeId: 'read-only' });
+        await connection.closeSession({ sessionId: session.sessionId });
+        const loaded = await connection.loadSession({
+          sessionId: session.sessionId,
+          cwd: root,
+          mcpServers: [],
+        });
+        assert.equal(
+          loaded.configOptions.find((option) => option.id === 'model').currentValue,
+          target.value
+        );
+        assert.equal(loaded.modes.currentModeId, 'read-only');
         if (fixture.missingCredential) {
           await connection.setSessionConfigOption({
             sessionId: session.sessionId,
