@@ -59,9 +59,20 @@ const cases = [
     missingCredential: true,
   },
   { name: 'absent settings retain defaults', expectedModel: 'deepseek-flash' },
-  { name: 'invalid YAML fails startup', settings: 'llm-deepseek: [\n', invalid: true },
   {
-    name: 'non-mapping settings document fails startup',
+    name: 'unavailable configured preset falls back to standard',
+    settings: 'agent-presets:\n  default: missing\n',
+    expectedModel: 'deepseek-flash',
+  },
+  {
+    name: 'legacy custom preset remains selectable and survives restoration',
+    settings: 'agent-presets:\n  default: synthetic-custom\n',
+    expectedModel: 'deepseek-flash',
+    customPreset: true,
+  },
+  { name: 'invalid YAML rejects initialization', settings: 'llm-deepseek: [\n', invalid: true },
+  {
+    name: 'non-mapping settings document rejects initialization',
     settings: '- invalid-settings-document\n',
     invalid: true,
   },
@@ -83,6 +94,19 @@ for (const fixture of cases) {
     const settingsPath = join(root, 'settings.yaml');
     if (fixture.settings !== undefined) await writeFile(settingsPath, fixture.settings);
     await mkdir(join(root, 'sessions'), { recursive: true });
+    if (fixture.customPreset) {
+      const custom = join(root, '.agent-presets', 'synthetic-custom');
+      await mkdir(custom, { recursive: true });
+      await writeFile(join(custom, 'preset.yml'), 'name: Synthetic custom\n');
+      await writeFile(
+        join(custom, 'agent.cordis.yml'),
+        '- name: ./plugin.mjs\n  config:\n    marker: !!js baseUrl\n- name: "@deepseek-ai/dsh-persona"\n  config:\n    prefix: Synthetic custom preset\n'
+      );
+      await writeFile(
+        join(custom, 'plugin.mjs'),
+        "import { realpathSync } from 'node:fs'; export function apply(ctx, config) { if (realpathSync(new URL(config.marker)) !== realpathSync(new URL('.', import.meta.url))) throw new Error('wrong preset expression base'); }\n"
+      );
+    }
 
     const profileDir = join(root, 'profiles', DEEPSEEK_HARNESS_PROFILE_NAME);
     await mkdir(profileDir, { recursive: true });
@@ -125,13 +149,39 @@ for (const fixture of cases) {
         clientCapabilities: {},
       });
       if (fixture.invalid) {
-        await assert.rejects(initialized);
-        const [code] = await exited;
-        assert.notEqual(code, 0);
-        assert.match(stderr, /settings|YAML/iu);
+        await assert.rejects(initialized, /settings|YAML/iu);
       } else {
         await initialized;
         const session = await connection.newSession({ cwd: root, mcpServers: [] });
+        const presets = session.configOptions.find((option) => option.id === 'agent_preset');
+        assert.deepEqual(
+          presets.options.map((option) => option.value).sort(),
+          [
+            'cordis',
+            'minimal',
+            'ptc',
+            'standard',
+            ...(fixture.customPreset ? ['synthetic-custom'] : []),
+          ].sort()
+        );
+        assert.equal(presets.currentValue, fixture.customPreset ? 'synthetic-custom' : 'standard');
+        for (const preset of [
+          'minimal',
+          'ptc',
+          'cordis',
+          'standard',
+          ...(fixture.customPreset ? ['synthetic-custom'] : []),
+        ]) {
+          const changed = await connection.setSessionConfigOption({
+            sessionId: session.sessionId,
+            configId: 'agent_preset',
+            value: preset,
+          });
+          assert.equal(
+            changed.configOptions.find((option) => option.id === 'agent_preset').currentValue,
+            preset
+          );
+        }
         const model = session.configOptions.find((option) => option.id === 'model');
         const target = model.options.find((option) => {
           const [provider, modelId] = decodeModelRoute(option.value) ?? [];
@@ -141,7 +191,7 @@ for (const fixture of cases) {
           );
         });
         assert.ok(target, JSON.stringify(model.options));
-        if (fixture.settings && !fixture.expectedProvider) {
+        if (fixture.settings?.startsWith('# preserved comment')) {
           assert.ok(
             !model.options.some(
               (option) => decodeModelRoute(option.value)?.[1] === 'deepseek-v4-pro'
@@ -165,6 +215,10 @@ for (const fixture of cases) {
           target.value
         );
         assert.equal(loaded.modes.currentModeId, 'read-only');
+        assert.equal(
+          loaded.configOptions.find((option) => option.id === 'agent_preset').currentValue,
+          fixture.customPreset ? 'synthetic-custom' : 'standard'
+        );
         if (fixture.missingCredential) {
           await connection.setSessionConfigOption({
             sessionId: session.sessionId,

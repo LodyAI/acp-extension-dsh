@@ -27,7 +27,10 @@ import {
  * per-agent model waterfall and permission-preset service.
  */
 import { createHash, randomUUID } from 'node:crypto';
-import { isAbsolute } from 'node:path';
+import { isAbsolute, join } from 'node:path';
+import { createRequire } from 'node:module';
+import { pathToFileURL } from 'node:url';
+import { readFile, readdir } from 'node:fs/promises';
 import { Readable, Writable } from 'node:stream';
 
 import {
@@ -341,6 +344,11 @@ export type DeepSeekAcpAdapterConfig = {
   provider?: string;
   model?: string;
   reasoningEffort?: string;
+  /** Directory of bundled declarative presets, registered in the profile scope. */
+  presetRoot?: string;
+  userPresetRoot?: string;
+  /** Legacy settings are validated on initialize, even if a provider failed to mount. */
+  settingsPath?: string;
   /** Runtime-only transport override used by unit tests. */
   stream?: Stream;
 };
@@ -1138,12 +1146,107 @@ function assertAllowed(value: string, allowed: ReadonlySet<string>, label: strin
   }
 }
 
+/** Register vendored YAML in the profile scope so native package resolution remains valid. */
+async function registerBundledPresets(
+  ctx: HarnessContext,
+  root: string,
+  userRoot?: string
+): Promise<void> {
+  const loader = ctx.get('loader') as { import(name: string): Promise<unknown> };
+  const yaml = (await loader.import('js-yaml')) as {
+    load(text: string, options: { schema: unknown }): unknown;
+  };
+  const include = (await loader.import('@deepseek-ai/cordis-plugin-include')) as {
+    entryListSchema: unknown;
+  };
+  const registry = ctx.agentPresets as typeof ctx.agentPresets & {
+    register(definition: { id: string; plugins: unknown[] }): Promise<() => Promise<void>>;
+  };
+  for (const id of ['standard', 'ptc', 'minimal', 'cordis']) {
+    const rows = yaml.load(await readFile(join(root, `${id}.yml`), 'utf8'), {
+      schema: include.entryListSchema,
+    }) as Array<{ config: { id: string; plugins: unknown[] } }>;
+    const definition = rows[0]?.config;
+    if (rows.length !== 1 || definition?.id !== id || !Array.isArray(definition.plugins)) {
+      throw new Error(`Invalid bundled preset: ${id}`);
+    }
+    const dispose = await registry.register(definition);
+    ctx.effect(() => dispose, `acp-extension-dsh.preset.${id}`);
+  }
+  if (userRoot) {
+    const directories = await readdir(userRoot, { withFileTypes: true }).catch(
+      (error: NodeJS.ErrnoException) => {
+        if (error.code === 'ENOENT') return [];
+        throw error;
+      }
+    );
+    for (const directory of directories) {
+      if (
+        !directory.isDirectory() ||
+        ['standard', 'ptc', 'minimal', 'cordis'].includes(directory.name)
+      )
+        continue;
+      try {
+        const folder = join(userRoot, directory.name);
+        const metadata = yaml.load(await readFile(join(folder, 'preset.yml'), 'utf8'), {
+          schema: include.entryListSchema,
+        }) as { name?: string; description?: string; order?: number };
+        const plugins = yaml.load(await readFile(join(folder, 'agent.cordis.yml'), 'utf8'), {
+          schema: include.entryListSchema,
+        });
+        if (!Array.isArray(plugins)) throw new Error('expected a plugin list');
+        // Legacy presets resolve local files/expressions beside the preset, but
+        // package names through the Harness installation. Preserve both bases.
+        const profile = ctx as HarnessContext & {
+          baseUrl: string;
+          extend(properties: { baseUrl: string }): { agentPresets: typeof registry };
+        };
+        const resolver = createRequire(profile.baseUrl);
+        const resolvePackages = (rows: unknown[]): void => {
+          for (const value of rows) {
+            if (!value || typeof value !== 'object') continue;
+            const row = value as { name?: unknown; group?: boolean; config?: unknown };
+            if (
+              typeof row.name === 'string' &&
+              !row.name.startsWith('.') &&
+              !isAbsolute(row.name) &&
+              !/^[a-z][a-z\d+.-]*:/i.test(row.name)
+            )
+              row.name = pathToFileURL(resolver.resolve(row.name)).href;
+            if (row.group && Array.isArray(row.config)) resolvePackages(row.config);
+          }
+        };
+        resolvePackages(plugins);
+        const scoped = profile.extend({ baseUrl: pathToFileURL(folder + '/').href });
+        const dispose = await scoped.agentPresets.register({
+          ...metadata,
+          id: directory.name,
+          plugins,
+        });
+        ctx.effect(() => dispose, `acp-extension-dsh.preset.${directory.name}`);
+      } catch (error) {
+        ctx.logger.warn(`user preset ${directory.name} is unavailable: ${errorChain(error)}`);
+      }
+    }
+  }
+}
+
 /** Mount the ACP bridge into the surrounding Harness composition. */
-export function apply(ctx: HarnessContext, rawConfig?: DeepSeekAcpAdapterConfig): void {
+export function apply(
+  ctx: HarnessContext,
+  rawConfig?: DeepSeekAcpAdapterConfig
+): void | Promise<void> {
+  if (rawConfig?.presetRoot) {
+    const { presetRoot, ...config } = rawConfig;
+    return registerBundledPresets(ctx, presetRoot, config.userPresetRoot).then(() =>
+      apply(ctx, config)
+    );
+  }
   const config = resolveAdapterConfig(rawConfig);
   const sessions = new Map<string, SessionRecord>();
   const activeMcpServerNames = new Set<string>();
   let closed = false;
+  let legacyDefaultPreset: string | undefined;
   let conn: AgentSideConnection;
   let imagePromptEnabled = false;
   let questionCapabilities = { form: false, answerNotes: false };
@@ -1875,13 +1978,25 @@ export function apply(ctx: HarnessContext, rawConfig?: DeepSeekAcpAdapterConfig)
         ...(reasoningEffort ? { reasoningEffort } : {}),
       },
     };
-    const agentPresetOptions = (await ctx.agentPresets.list()).filter(
-      (preset) => preset.broken === undefined
-    );
-    let requestedPreset = fork?.agentPreset ?? ctx.agentPresets.defaultId;
+    const presetRoster = await ctx.agentPresets.list();
+    const agentPresetOptions = presetRoster.filter((preset) => preset.broken === undefined);
+    let requestedPreset = fork?.agentPreset ?? legacyDefaultPreset ?? ctx.agentPresets.defaultId;
     let restoredEvents: ForkSnapshot['seed'] = [];
+    if (
+      !restore &&
+      !fork &&
+      !agentPresetOptions.some((preset) => preset.id === requestedPreset) &&
+      agentPresetOptions.some((preset) => preset.id === 'standard')
+    ) {
+      ctx.logger.warn(
+        `default agent preset ${JSON.stringify(requestedPreset)} is unavailable; using standard`
+      );
+      requestedPreset = 'standard';
+    }
     if (!restore && !agentPresetOptions.some((preset) => preset.id === requestedPreset)) {
-      throw internalError(`default agent preset ${JSON.stringify(requestedPreset)} is unavailable`);
+      throw internalError(
+        `default agent preset ${JSON.stringify(requestedPreset)} is unavailable: ${presetRoster.find((preset) => preset.id === requestedPreset)?.broken ?? 'not registered'}`
+      );
     }
     const mcpServerNames = reserveMcpServerNames(
       params.mcpServers,
@@ -2103,6 +2218,46 @@ export function apply(ctx: HarnessContext, rawConfig?: DeepSeekAcpAdapterConfig)
     conn = connection;
     return {
       async initialize(_params: InitializeRequest): Promise<InitializeResponse> {
+        // Preset declarations and provider configuration activate independently of
+        // the registry service. Do not answer the first request before they settle.
+        const loader = ctx.get('loader') as { await(): Promise<void> } | undefined;
+        await loader?.await();
+        if (rawConfig?.settingsPath) {
+          let source: string | undefined;
+          try {
+            source = await readFile(rawConfig.settingsPath, 'utf8');
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+          }
+          if (source !== undefined) {
+            const importer = ctx.get('loader') as { import(name: string): Promise<unknown> };
+            const yaml = (await importer.import('js-yaml')) as { load(text: string): unknown };
+            try {
+              const document = yaml.load(source) ?? {};
+              if (typeof document !== 'object' || Array.isArray(document))
+                throw new Error('expected a mapping');
+              for (const namespace of ['llm-deepseek', 'llm-pi-ai', 'agent-presets']) {
+                const section = (document as Record<string, unknown>)[namespace];
+                if (section != null && (typeof section !== 'object' || Array.isArray(section)))
+                  throw new Error(`${namespace} must be a mapping`);
+              }
+              const defaultPreset = (
+                (document as Record<string, unknown>)['agent-presets'] as
+                  { default?: unknown } | undefined
+              )?.default;
+              if (
+                defaultPreset !== undefined &&
+                (typeof defaultPreset !== 'string' || !defaultPreset.trim())
+              )
+                throw new Error('invalid default preset');
+              legacyDefaultPreset = defaultPreset as string | undefined;
+            } catch {
+              throw invalidParams(
+                'settings.yaml is invalid; expected YAML model configuration mappings'
+              );
+            }
+          }
+        }
         subagentEvents = supportsLodySubagentEvents(_params.clientCapabilities);
         const elicitation = _params.clientCapabilities?._meta?.lody;
         const notes =

@@ -42,10 +42,13 @@ endpoint cannot provide a usable list. Without an endpoint, the Harness catalog
 remains advisory: an explicitly configured or selected model is still resolved
 even when it is not listed.
 
-The ACP host mounts Harness's file-backed settings provider. It reads
-`$DSH_HOME/settings.yaml`, falling back to `~/.dsh/settings.yaml`, and exposes
-user sections to settings-aware plugins. Missing settings preserve composition
-defaults; malformed settings documents fail startup instead of being silently ignored.
+Harness is pinned to **0.2.0-rc.2** (npm `latest` at upgrade time). The ACP profile
+reads `llm-deepseek`, `llm-pi-ai`, and `agent-presets.default` from
+`$DSH_HOME/settings.yaml`, falling back to `~/.dsh/settings.yaml`. Model sections
+feed native provider Config schemas. Missing settings preserve defaults; malformed
+documents reject ACP initialization. The native settings migration is disabled:
+it would rename the shared file and move settings into a generated profile.
+This bridge never rewrites or renames the user's settings.
 The `llm-deepseek.models` array replaces the local catalog in full, so retain any
 default models and their vision metadata that should remain selectable. For example:
 
@@ -66,7 +69,7 @@ llm-deepseek:
       name: Custom model
 ```
 
-The provider watches file edits, but ACP model choices are cached per connection.
+Settings are read at startup and ACP model choices are cached per connection.
 Reconnect and refresh the host's model capabilities after catalog edits.
 `DEEPSEEK_BASE_URL` still selects endpoint discovery: this setting does not merge
 local-only model IDs into an endpoint's `/models` response. API credentials remain
@@ -100,7 +103,7 @@ and refresh capabilities after changing the route catalog.
 ## Token and USD accounting
 
 Core's usage capability reports committed request usage, cumulative per-model
-totals and already-included deltas. The pinned Harness 0.1.1-rc.2 supplies usage
+totals and already-included deltas. The pinned Harness supplies usage
 on `assistant/message` and actual route metadata on `request/context`; raw stream
 chunks are not counted again. No model request or transcript is needed by tests.
 Only reported activity in the ACP-owned Harness session is counted; separate
@@ -115,7 +118,7 @@ new `deepseek-flash` price. Unknown models/custom endpoints have no estimated co
 These are list-price estimates, not invoices; cross-boundary requests can differ.
 Only the registered `deepseek-official` route at the official endpoint is priced;
 an arbitrary provider named `deepseek` is not evidence of official billing.
-Publish Core 0.1.5 before releasing this adapter dependency.
+The adapter consumes the published Core 0.1.9 contract.
 
 ## Exports
 
@@ -130,16 +133,21 @@ The host launches the pinned `dsh` executable with
 bundle plus the Lody `cordis.patch.yml` overlay) under
 `$DSH_HOME/profiles/lody-acp`. It stages this package's official
 `standard`/`ptc`/`minimal`/`cordis` preset snapshot beside the ACP adapter.
-Harness mounts the selected preset per session and also discovers user presets
-below `$DSH_HOME/.agent-presets`. MCP tools use Harness's native
+The adapter registers the upstream declarations in the native registry and retains
+legacy user declarations (`preset.yml` plus `agent.cordis.yml`) below
+`$DSH_HOME/.agent-presets`. Built-in names take precedence. Unavailable configured
+defaults fall back to usable Standard mode; explicit selections remain strict.
+Harness binds the selected preset revision per session. MCP tools use Harness's native
 `mcp__<server>__<tool>` naming and are removed with their owning ACP session.
 
 The generated profile defaults session persistence to upstream's `zstd`
 encoding. A host that reuses an existing Harness session root may pass `none`
 to the profile builder only after verifying that the root contains raw
-`session.jsonl` artifacts and no `session.jsonl.zstd` artifacts. Harness roots
+`session[.vN].jsonl` artifacts and no `session[.vN].jsonl.zstd` artifacts. Harness roots
 are single-encoding stores: hosts must refuse mixed roots without moving,
-rewriting, or deleting user artifacts.
+rewriting, or deleting user artifacts. Harness 0.2 writes V4 successors on native
+write-open when migrating supported historical formats, retaining the old files.
+Retained predecessors do not provide automatic downgrade after new turns.
 
 The ACP profile keeps the session-query service mounted for exact reads but sets
 its full-text SQLite index to `openAt: never`. This composition does not expose
@@ -321,6 +329,10 @@ turn repair, ordered load replay, silent resume, continued model context and usa
 npm run build
 DSH_TEST_RUNTIME_ROOT=/absolute/runtime/node_modules node --test scripts/session-restore-smoke.mjs
 ```
+
+Set `DSH_TEST_PREVIOUS_RUNTIME_ROOT` to a separately installed 0.1.5-rc.2
+`node_modules` directory to additionally create old sessions and restore them with
+the current runtime, checking that historical artifacts remain byte-identical.
 
 The settings/profile probe also checks load after close with a retained model and
 permission preset. Real remote models, full subagent-history replay and file rollback

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { createRequire } from 'node:module';
-import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -15,7 +15,10 @@ const runtime = process.env.DSH_TEST_RUNTIME_ROOT;
 assert.ok(runtime, 'Set DSH_TEST_RUNTIME_ROOT to the pinned Harness node_modules');
 const requireRuntime = createRequire(join(runtime, '.restore-test.cjs'));
 const load = (name) => import(pathToFileURL(requireRuntime.resolve(`@deepseek-ai/${name}`)).href);
-assert.equal(requireRuntime('@deepseek-ai/dsh-agent-loop/package.json').version, '0.1.5-rc.2');
+assert.equal(
+  requireRuntime('@deepseek-ai/dsh-agent-loop/package.json').version,
+  process.env.DSH_TEST_EXPECTED_RUNTIME_VERSION ?? '0.2.0-rc.2'
+);
 
 if (process.argv[2] === '--phase') {
   const [root, compression, phase] = process.argv.slice(3);
@@ -151,7 +154,12 @@ if (process.argv[2] === '--phase') {
       try {
         const { events } = await writer.read();
         await writer.append([
-          { type: 'turn/start', seq: events.length, time: 1, data: { turn: 99 } },
+          {
+            type: 'turn/start',
+            seq: events.length,
+            time: 1,
+            data: { turn: events.filter((event) => event.type === 'turn/start').length + 1 },
+          },
         ]);
       } finally {
         await writer.close();
@@ -162,22 +170,52 @@ if (process.argv[2] === '--phase') {
     await ctx.fiber.dispose();
   }
 } else {
-  for (const compression of ['none', 'zstd']) {
-    await test(`native ${compression} cold load and resume preserve identity and model context`, async () => {
-      const root = await mkdtemp(join(tmpdir(), 'dsh-acp-restore-'));
-      try {
-        for (const phase of ['new', 'load', 'resume'])
-          await promisify(execFile)(
-            process.execPath,
-            [fileURLToPath(import.meta.url), '--phase', root, compression, phase],
-            {
-              env: { PATH: process.env.PATH, DSH_TEST_RUNTIME_ROOT: runtime },
-              timeout: 60_000,
+  const origins = [
+    undefined,
+    ...(process.env.DSH_TEST_PREVIOUS_RUNTIME_ROOT
+      ? [process.env.DSH_TEST_PREVIOUS_RUNTIME_ROOT]
+      : []),
+  ];
+  for (const previous of origins)
+    for (const compression of ['none', 'zstd']) {
+      await test(`native ${compression}${previous ? ' upgrade from 0.1.5-rc.2' : ''} cold load and resume preserve identity and model context`, async () => {
+        const root = await mkdtemp(join(tmpdir(), 'dsh-acp-restore-'));
+        try {
+          let originalFiles = [];
+          for (const phase of ['new', 'load', 'resume']) {
+            await promisify(execFile)(
+              process.execPath,
+              [fileURLToPath(import.meta.url), '--phase', root, compression, phase],
+              {
+                env: {
+                  PATH: process.env.PATH,
+                  DSH_TEST_RUNTIME_ROOT: previous && phase === 'new' ? previous : runtime,
+                  DSH_TEST_EXPECTED_RUNTIME_VERSION:
+                    previous && phase === 'new' ? '0.1.5-rc.2' : '0.2.0-rc.2',
+                },
+                timeout: 60_000,
+              }
+            );
+            if (previous && phase === 'new') {
+              const files = await readdir(join(root, 'sessions'), { recursive: true });
+              originalFiles = await Promise.all(
+                files
+                  .filter((file) => /session.*\.jsonl(?:\.zstd)?$/.test(file))
+                  .map(async (file) => [file, await readFile(join(root, 'sessions', file))])
+              );
+              assert.ok(originalFiles.length > 0);
+            } else if (previous) {
+              for (const [file, bytes] of originalFiles)
+                assert.deepEqual(
+                  await readFile(join(root, 'sessions', file)),
+                  bytes,
+                  'migration must retain historical artifacts unchanged'
+                );
             }
-          );
-      } finally {
-        await rm(root, { recursive: true, force: true });
-      }
-    });
-  }
+          }
+        } finally {
+          await rm(root, { recursive: true, force: true });
+        }
+      });
+    }
 }

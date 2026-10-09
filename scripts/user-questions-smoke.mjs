@@ -14,12 +14,18 @@ const requireRuntime = createRequire(join(runtime, '.user-questions-test.cjs'));
 const load = (name) => import(pathToFileURL(requireRuntime.resolve(name)).href);
 const { Context } = await load('@deepseek-ai/cordis');
 const { createScope } = await load('@deepseek-ai/dsh-scope');
+const { default: SessionStore, SessionId } = await load('@deepseek-ai/dsh-session');
 const { UserQuestionService } = await load('@deepseek-ai/dsh-user-questions');
 const askTool = await load('@deepseek-ai/dsh-tool-ask-user');
-assert.equal(requireRuntime('@deepseek-ai/dsh-user-questions/package.json').version, '0.1.5-rc.2');
+assert.equal(requireRuntime('@deepseek-ai/dsh-user-questions/package.json').version, '0.2.0-rc.2');
 
 await test('native Harness tool → scoped waterfall → ACP → native answers and ownership failures', async () => {
   const ctx = new Context();
+  await ctx.plugin(SessionStore).await();
+  const checkpoints = new Map();
+  ctx.on('session/flush', (session) =>
+    checkpoints.set(session.id, structuredClone(session.snapshotEvents()))
+  );
   const agents = new Map();
   const roots = new Set();
   const scopes = [];
@@ -51,7 +57,7 @@ await test('native Harness tool → scoped waterfall → ACP → native answers 
     create: async (options) => {
       const agent = {
         id: options.sessionId,
-        session: { id: options.sessionId, header: { id: options.sessionId } },
+        session: ctx.sessions.create(SessionId(options.sessionId), { meta: options.meta }),
         followup() {},
         cancel() {},
         whenIdle: async () => {},
@@ -229,6 +235,7 @@ await test('native Harness tool → scoped waterfall → ACP → native answers 
       ),
       'allowed-once'
     );
+    assert.ok(checkpoints.get(first.sessionId).some((event) => event.type === 'model/selection'));
     await client.closeSession({ sessionId: first.sessionId });
     await assert.rejects(ctx.userQuestions.ask({ agent, questions }), {
       code: 'CALLER_NOT_LIVE',
@@ -239,5 +246,6 @@ await test('native Harness tool → scoped waterfall → ACP → native answers 
     endClient();
     await client.closed;
     for (const scope of scopes) await scope.dispose();
+    await ctx.fiber.dispose();
   }
 });
