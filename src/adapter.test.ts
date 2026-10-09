@@ -1916,6 +1916,15 @@ describe('DeepSeek Harness ACP adapter', () => {
         expect.objectContaining({ taskId: events[3].runId, status: 'killed' }),
       ])
     );
+    h.spawnChild('reused', 'first-activation');
+    h.spawnChild('reused', 'replacement-activation');
+    const replacements = (
+      await h.client.extMethod('_lody/subagents/list', { sessionId: h.session.sessionId })
+    ).tasks as Array<{ agentId: string; taskId: string; status: string }>;
+    expect(
+      replacements.filter((task) => task.agentId === 'reused').map((task) => task.status)
+    ).toEqual(['lost', 'running']);
+    expect(new Set(replacements.map((task) => task.taskId)).size).toBe(replacements.length);
   });
 
   it('delivers tool details, nested calls, approval and terminal failures through ACP', async () => {

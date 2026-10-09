@@ -1455,7 +1455,10 @@ export function apply(
     }
     const emitter = runs;
     const previous = children.get(info.id);
-    if (previous?.live)
+    if (previous?.live) {
+      previous.live = false;
+      previous.task.status = 'lost';
+      previous.task.endedAtEpochSeconds = Date.now() / 1000;
       enqueueOutput(record, () =>
         previous.runs.snapshot(previous.nativeId, {
           state: 'unknown',
@@ -1463,6 +1466,7 @@ export function apply(
           reason: { code: 'lost' },
         })
       );
+    }
     const agent = info.local ? ctx.agents.get(info.id) : undefined;
     const child: Child = {
       record,
