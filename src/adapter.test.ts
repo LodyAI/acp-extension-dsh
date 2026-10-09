@@ -175,9 +175,37 @@ describe('DeepSeek Harness ACP adapter', () => {
     let released = 0;
     let flushGate: Promise<void> | undefined;
     let flushStarted: (() => void) | undefined;
+    let setupGate: Promise<void> | undefined;
+    let setupStarted: (() => void) | undefined;
     const context: Context = {
       agents: {
         get: (id) => live.get(id),
+        resume: async (options) => {
+          const source = stored.get(options.resumeSessionId);
+          if (!source) throw new Error('missing native session');
+          if (live.has(options.resumeSessionId)) throw new Error('native session busy');
+          return context.agents.create({
+            sessionId: options.resumeSessionId,
+            meta: source.header,
+            seed: source.events,
+            agentOptions: { provider: 'unused', model: 'unused' },
+            setup: async (agentContext) => {
+              await options.setup(agentContext, {
+                id: options.resumeSessionId,
+                ctx: agentContext,
+                session: {
+                  id: options.resumeSessionId,
+                  header: source.header,
+                  snapshotEvents: () => source.events,
+                  append() {},
+                },
+                followup() {},
+                cancel() {},
+                whenIdle: async () => {},
+              });
+            },
+          });
+        },
         create: async (options) => {
           const plugins: unknown[] = [];
           const agentContext: Parameters<typeof options.setup>[0] = {
@@ -201,7 +229,14 @@ describe('DeepSeek Harness ACP adapter', () => {
           const agent: Agent = {
             id: options.sessionId,
             ctx: agentContext,
-            session: { id: options.sessionId, header: snapshot.header },
+            session: {
+              id: options.sessionId,
+              header: snapshot.header,
+              snapshotEvents: () => snapshot.events,
+              append(type, data) {
+                snapshot.events.push({ type, data, seq: snapshot.events.length });
+              },
+            },
             cancel() {},
             whenIdle: async () => {},
             followup(message) {
@@ -229,7 +264,11 @@ describe('DeepSeek Harness ACP adapter', () => {
       agentPresets: {
         defaultId: 'standard',
         list: async () => [{ id: 'standard' }, { id: 'minimal' }],
-        mount: async (_ctx, id = 'standard') => ({ id }),
+        mount: async (_ctx, id = 'standard') => {
+          setupStarted?.();
+          await setupGate;
+          return { id };
+        },
         select: async (_agent, id) => id,
       },
       permissionPresets: {
@@ -344,9 +383,202 @@ describe('DeepSeek Harness ACP adapter', () => {
         flushGate = gate;
         flushStarted = started;
       },
+      blockSetup(gate: Promise<void>, started: () => void) {
+        setupGate = gate;
+        setupStarted = started;
+      },
       released: () => released,
     };
   }
+
+  it('loads the original native identity, replays ordered history, and continues without a new session', async () => {
+    const h = await forkHarness();
+    expect(h.initialized.agentCapabilities.loadSession).toBe(true);
+    expect(h.initialized.agentCapabilities.sessionCapabilities?.resume).toEqual({});
+    const source = h.stored.get('cold-source')!;
+    source.events.splice(
+      5,
+      0,
+      {
+        type: 'assistant/message',
+        seq: 0,
+        data: {
+          turn: 1,
+          message: {
+            content: [
+              { type: 'reasoning', text: 'thought' },
+              { type: 'text', text: 'answer' },
+            ],
+          },
+        },
+      },
+      {
+        type: 'tool/call',
+        seq: 0,
+        data: { callId: 'call-1', name: 'read', arguments: '{"path":"a"}' },
+      },
+      {
+        type: 'tool/result',
+        seq: 0,
+        data: {
+          message: {
+            content: [
+              {
+                type: 'tool-result',
+                toolCallId: 'call-1',
+                content: [{ type: 'text', text: 'result' }],
+              },
+            ],
+          },
+        },
+      }
+    );
+    source.events.forEach((event, seq) => {
+      event.seq = seq;
+    });
+    const before = structuredClone(source);
+    const loaded = await h.client.loadSession({
+      sessionId: 'cold-source',
+      cwd: '/source',
+      mcpServers: [{ name: 'resume-tools', command: 'synthetic', args: [], env: [] }],
+    });
+    expect([...h.live.keys()]).toEqual(['cold-source']);
+    expect(h.stored.get('cold-source')).toEqual(before);
+    expect(selectValue(loaded.configOptions, 'agent_preset')).toBe('minimal');
+    expect(selectValue(loaded.configOptions, 'reasoning_effort')).toBe('max');
+    expect(h.mounted.get('cold-source')).toMatchObject([
+      { serverName: 'resume-tools', cwd: '/source' },
+    ]);
+    const transcript = h.updates as Array<{
+      update: { sessionUpdate: string; content?: { text?: string } };
+    }>;
+    expect(
+      transcript
+        .filter(({ update }) => update.content?.text)
+        .map(({ update }) => [update.sessionUpdate, update.content?.text])
+    ).toEqual([
+      ['user_message_chunk', 'first'],
+      ['agent_thought_chunk', 'thought'],
+      ['agent_message_chunk', 'answer'],
+    ]);
+    expect(h.updates).toContainEqual(
+      expect.objectContaining({
+        update: expect.objectContaining({ sessionUpdate: 'tool_call', toolCallId: 'call-1' }),
+      })
+    );
+    await expect(
+      h.client.setSessionConfigOption({
+        sessionId: 'cold-source',
+        configId: 'agent_preset',
+        value: 'standard',
+      })
+    ).rejects.toThrow('fixed');
+    await h.client.prompt({
+      sessionId: 'cold-source',
+      prompt: [{ type: 'text', text: 'continue' }],
+    });
+    expect(h.updates).toContainEqual(
+      expect.objectContaining({
+        sessionId: 'cold-source',
+        update: expect.objectContaining({ content: { type: 'text', text: 'continued' } }),
+      })
+    );
+    await h.client.closeSession({ sessionId: 'cold-source' });
+    h.updates.length = 0;
+    await h.client.resumeSession({ sessionId: 'cold-source', cwd: '/source', mcpServers: [] });
+    expect(h.updates).toEqual([]);
+    expect([...h.live.keys()]).toEqual(['cold-source']);
+  });
+
+  it('rejects invalid restore identities and releases failed setup for retry', async () => {
+    const h = await forkHarness();
+    const request = {
+      sessionId: 'cold-source',
+      cwd: '/source',
+      mcpServers: [{ name: 'retry-tools', command: 'synthetic', args: [], env: [] }],
+    };
+    await expect(h.client.loadSession({ ...request, sessionId: 'missing' })).rejects.toThrow(
+      'missing native session'
+    );
+    await expect(h.client.loadSession({ ...request, cwd: '/other' })).rejects.toThrow('cwd');
+    await expect(
+      h.client.loadSession({ ...request, additionalDirectories: ['/ignored'] })
+    ).rejects.toThrow();
+    h.setSetupFailure(true);
+    await expect(h.client.loadSession(request)).rejects.toThrow('MCP unavailable');
+    expect(h.live.size).toBe(0);
+    h.setSetupFailure(false);
+    await h.client.resumeSession(request);
+    expect(h.mounted.get(request.sessionId)).toMatchObject([{ serverName: 'retry-tools' }]);
+    await expect(h.client.loadSession(request)).rejects.toThrow('already active');
+    expect([...h.live.keys()]).toEqual([request.sessionId]);
+    await h.client.closeSession({ sessionId: request.sessionId });
+    const source = h.stored.get(request.sessionId)!;
+    Object.assign(source.header, { origin: 'subagent' });
+    await expect(h.client.resumeSession(request)).rejects.toThrow('subagent');
+    expect(h.live.size).toBe(0);
+  });
+
+  it('keeps restore exclusive until MCP/preset setup completes and cleans up failed history delivery', async () => {
+    const h = await forkHarness();
+    let release!: () => void;
+    let markStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    h.blockSetup(
+      new Promise<void>((resolve) => {
+        release = resolve;
+      }),
+      markStarted
+    );
+    const request = { sessionId: 'cold-source', cwd: '/source', mcpServers: [] };
+    const loading = h.client.loadSession(request);
+    await started;
+    await expect(h.client.resumeSession(request)).rejects.toThrow('being restored');
+    expect(h.live.size).toBe(0);
+    release();
+    await loading;
+    await h.client.closeSession({ sessionId: request.sessionId });
+    const source = h.stored.get(request.sessionId)!;
+    source.events.push({
+      type: 'assistant/message',
+      seq: source.events.length,
+      data: {
+        turn: 2,
+        message: { content: [{ type: 'image', attachment: { attachmentId: 'missing' } }] },
+      },
+    });
+    await expect(h.client.loadSession(request)).rejects.toThrow('attachment');
+    expect(h.live.size).toBe(0);
+    // Resume needs no historic attachment reads; the original native log remains usable.
+    await h.client.resumeSession(request);
+    expect(h.live.has(request.sessionId)).toBe(true);
+  });
+
+  it('persists model selections made after the last prompt and restores them without replay', async () => {
+    const h = await forkHarness();
+    const request = { sessionId: 'cold-source', cwd: '/source', mcpServers: [] };
+    await h.client.resumeSession(request);
+    await h.client.setSessionConfigOption({
+      sessionId: request.sessionId,
+      configId: 'model',
+      value: acpModelId('deepseek-official', 'deepseek-v4-pro'),
+    });
+    await h.client.setSessionConfigOption({
+      sessionId: request.sessionId,
+      configId: 'reasoning_effort',
+      value: 'low',
+    });
+    expect(h.flushed.has(request.sessionId)).toBe(true);
+    await h.client.closeSession({ sessionId: request.sessionId });
+    const resumed = await h.client.resumeSession(request);
+    expect(selectValue(resumed.configOptions, 'model')).toBe(
+      acpModelId('deepseek-official', 'deepseek-v4-pro')
+    );
+    expect(selectValue(resumed.configOptions, 'reasoning_effort')).toBe('low');
+    expect(h.updates).toEqual([]);
+  });
 
   it('forks cold native histories at exact Core turns, preserving prefixes and target configuration', async () => {
     const h = await forkHarness();
@@ -710,6 +942,14 @@ describe('DeepSeek Harness ACP adapter', () => {
         forkAtTurn: { version: 1 },
         compaction: { version: 1 },
         usage: { version: 1 },
+        sessionHistory: { version: 1 },
+        steering: {
+          version: 1,
+          transport: 'request',
+          upstreamTurn: 'same',
+          configPolicy: 'active',
+        },
+        subagents: { version: 1, lifecycle: true, list: true, output: true, cancel: true },
         sessionTitle: { version: 1 },
         subagentEvents: { version: 1 },
       },
@@ -1474,6 +1714,8 @@ describe('DeepSeek Harness ACP adapter', () => {
             session: {
               id: options.sessionId,
               header: { id: options.sessionId },
+              append() {},
+              snapshotEvents: () => [],
             },
             followup: vi.fn(),
             cancel: vi.fn(),
@@ -1545,7 +1787,20 @@ describe('DeepSeek Harness ACP adapter', () => {
       currentAgent: () => createdAgent!,
       approval: globalListeners.get('approval/request')!,
       spawnChild: (id: string, nativeId: string, parent = createdAgent!) => {
-        const agent = { ...createdAgent!, id, session: { id, header: { id } } };
+        const agent = {
+          ...createdAgent!,
+          id,
+          session: { id, header: { id } },
+          cancel() {
+            globalListeners.get('subagent/end')!({
+              id,
+              runId: nativeId,
+              provider: 'spawn',
+              local: true,
+              stopReason: 'aborted',
+            });
+          },
+        };
         childAgents.set(id, agent);
         globalListeners
           .get('subagent/start')!
@@ -1612,9 +1867,64 @@ describe('DeepSeek Harness ACP adapter', () => {
       snapshot: { parentRunId: null, support: { stream: ['text', 'thought', 'tool'] } },
     });
     expect(events[3]).toMatchObject({ snapshot: { parentRunId: events[0].runId } });
+    const roster = await h.client.extMethod('_lody/subagents/list', {
+      sessionId: h.session.sessionId,
+    });
+    expect(roster.tasks).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ taskId: events[0].runId, status: 'completed' }),
+        expect.objectContaining({ taskId: events[3].runId, status: 'running' }),
+      ])
+    );
+    expect((roster.tasks as unknown[]).length).toBe(2);
+    expect(
+      await h.client.extMethod('_lody/subagents/output', {
+        sessionId: h.session.sessionId,
+        taskId: events[0].runId,
+      })
+    ).toEqual({ output: 'Found it\n' });
+    await expect(
+      h.client.extMethod('_lody/subagents/output', {
+        sessionId: h.session.sessionId,
+        taskId: 'native-foreign',
+      })
+    ).rejects.toThrow('unknown subagent');
+    expect(
+      await h.client.extMethod('_lody/subagents/list', {
+        sessionId: h.session.sessionId,
+        activeOnly: true,
+      })
+    ).toEqual({ tasks: [expect.objectContaining({ taskId: events[3].runId })] });
+
     expect(updates.filter((value) => value.update.sessionUpdate === 'agent_message_chunk')).toEqual(
       []
     );
+    await h.client.extMethod('_lody/subagents/cancel', {
+      sessionId: h.session.sessionId,
+      taskId: events[3].runId,
+    });
+    expect(
+      await h.client.extMethod('_lody/subagents/list', {
+        sessionId: h.session.sessionId,
+        activeOnly: true,
+      })
+    ).toEqual({ tasks: [] });
+    expect(
+      (await h.client.extMethod('_lody/subagents/list', { sessionId: h.session.sessionId })).tasks
+    ).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ taskId: events[3].runId, status: 'killed' }),
+      ])
+    );
+    h.spawnChild('reused', 'first-activation');
+    h.spawnChild('reused', 'replacement-activation');
+    const replacements = (
+      await h.client.extMethod('_lody/subagents/list', { sessionId: h.session.sessionId })
+    ).tasks as Array<{ agentId: string; taskId: string; status: string }>;
+    expect(
+      replacements.filter((task) => task.agentId === 'reused').map((task) => task.status)
+    ).toEqual(['lost', 'running']);
+    expect(new Set(replacements.map((task) => task.taskId)).size).toBe(replacements.length);
   });
 
   it('delivers tool details, nested calls, approval and terminal failures through ACP', async () => {

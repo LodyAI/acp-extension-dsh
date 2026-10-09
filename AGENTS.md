@@ -1,7 +1,6 @@
 # acp-extension-dsh contributor guide
 
-This package is the provider-owned integration boundary between ACP and DeepSeek
-Harness. Keep it usable without importing Lody packages.
+Provider-owned ACP/Harness boundary. Keep it usable without importing Lody packages.
 
 ## Ownership
 
@@ -29,32 +28,27 @@ Harness. Keep it usable without importing Lody packages.
   bundle plus a `cordis.patch.yml` overlay that disables telemetry/product rows
   and mounts this adapter as the ACP entry. That entry's `name` is a module
   specifier, so render the adapter path as a `file:` URL: a raw Windows path
-  (`C:\...`) parses as the `c:` URL scheme and fails the ESM loader. Keep every
-  transitive DSH dependency
-  and peer package in that exact-version closure; Harness caret ranges must never
-  let npm mix a later release candidate into a cold install. `presets/` is the
-  pinned copy of the official `standard`/`ptc`/`minimal`/`cordis` Agent presets;
-  update it together with the package list and retain the upstream notice. It is
-  excluded from Prettier so the vendored files remain byte-identical to upstream.
-  The base bundle mounts `dsh-settings-file`, so settings resolve from
-  `$DSH_HOME/settings.yaml` (or `~/.dsh/settings.yaml`); keep its package in the
-  exact-version closure because the abstract `dsh-settings` dependency alone
-  reads no file.
-  The ACP entry must require `settings` so its first capability request cannot
-  cache a default catalog before the user document has loaded.
-  Keep `dsh-llm-pi-ai` dormant in the host composition and let its settings namespace
-  own custom route lifecycle and credential references. ACP model ids must encode the
-  exact provider/model pair; never collapse equal model ids or fall back after a route fails.
+  (`C:\...`) parses as the `c:` URL scheme and fails the ESM loader. Pin transitive DSH dependencies and peers too; cold installs must not mix releases. `presets/` contains the official
+  standard/ptc/minimal/cordis declarations, with only the outer patch insertion
+  envelope removed. Refresh from the pinned `dsh-web-app` package and retain its
+  notice; creator skills resolve from `dsh-agent-preset`. Exclude these files from
+  formatting. Register them in the profile scope for runtime package resolution;
+  retain legacy `$DSH_HOME/.agent-presets` identities and configured defaults.
+  Disable Harness 0.2's automatic settings migration in this generated profile.
+  Read legacy model sections into native Config without modifying settings.yaml;
+  validate on ACP initialize and wait for Loader settlement before catalogs.
+  Model changes require a fresh connection. Keep `dsh-llm-pi-ai` dormant without
+  configured providers. Native Config owns route lifecycle and credentials.
+  ACP model ids encode the exact provider/model pair; never collapse equal ids
+  or fall back after a route fails.
   Its persistence default matches upstream `zstd`; hosts may select legacy raw
   `none` only after inspecting an existing single-encoding root. A mixed root is
   an error and must never trigger automatic artifact mutation or deletion.
   Keep the SQLite session-query service mounted with `openAt: never`: this ACP
   composition needs its exact-read contract but exposes no full-text search,
   and public Node builds do not reliably include SQLite FTS5.
-  Keep the npm-10-compatible `0.1.5-rc.2` closure exact; never use `--force` or
-  `--legacy-peer-deps`. Cordis-ecosystem versions are independent: use
-  `createDeepSeekHarnessNpxSpecifiers()` and its
-  `DEEPSEEK_HARNESS_CORDIS_PACKAGE_VERSIONS`, never append the Harness version.
+  Use createDeepSeekHarnessNpxSpecifiers(); keep Cordis versions independent.
+  Never force npm peer resolution.
 - `src/capabilities.ts` metadata is authoritative for built-in preset labels exposed
   through ACP. Harness runtime metadata remains authoritative for user presets.
 - Hosts own installation caches, data-directory selection, process supervision,
@@ -70,6 +64,11 @@ Harness. Keep it usable without importing Lody packages.
 Change profile and adapter together for selector/service changes. Keep credentials
 in the host environment, never generated profiles.
 
+Core controls must retain ACP prompt ownership across goals and steering.
+History queries never activate writers. Project metadata never changes cwd or
+permissions. Force quiet job completion at preset registration; never admit
+unowned root steps. Per-run query/cancel support follows actual local ownership.
+
 Preserve valid available ACP MCP names; normalize invalid names and suffix
 collisions in Harness's process-global tool namespace.
 MCP plugin fibers belong to the Agent context and must settle before `session/new`
@@ -81,10 +80,9 @@ standard ACP tool-call lifecycle. Compaction meaning belongs only in the shared
 `_meta.lody.activity` contract from `acp-extension-core`; manual compaction has a
 `null` Harness turn owner and automatic compaction has a numeric owner.
 
-The managed profile retains the upstream first-prompt title plugin. Declare Core
-`sessionTitle` and forward durable `session/title` events on the session output
-queue; map provider/user/fallback sources to generated/explicit/fallback. Never
-upgrade a first-message preview to a generated title.
+Retain the first-prompt title plugin. Declare Core `sessionTitle`; queue durable
+`session/title` events, mapping provider/user/fallback to generated/explicit/fallback.
+Never label a first-message preview as generated.
 
 ## Tool projection
 
@@ -125,3 +123,8 @@ Never round unknown targets, copy open tails, replay a transcript prompt, or alt
 source runtime/files. Preserve target cwd/MCP; flush ended prompts and children before success.
 Release failed children and identify any possible stored artifact in the error.
 See README for scope and native validation.
+
+## Session restoration
+
+Use native resume with original ID/cwd and fresh MCP; reject subagents/duplicate
+activation and clean up failures. Load replays history, resume does not. See README.

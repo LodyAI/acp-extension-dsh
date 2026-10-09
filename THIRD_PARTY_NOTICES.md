@@ -1,6 +1,7 @@
 # Third-party notices
 
-The files under `presets/` are copied from DeepSeek Harness 0.1.5-rc.2:
+The files under `presets/` are derived from the DeepSeek Harness 0.2.0-rc.2 `dsh-web-app` preset patches,
+removing only their outer `insert` envelope for registry loading:
 https://github.com/deepseek-ai/deepseek-harness
 
 MIT License

@@ -16,8 +16,10 @@ committed assistant messages, live reasoning and the existing rich tool projecti
 non-local runs expose lifecycle and final summaries only. Scope-carrier identity,
 not tool titles, establishes ancestry. Child approvals keep run-scoped tool IDs on
 the root ACP connection; delegated questionnaires remain outside the root bridge.
-Normalized runs offer no cancellation/output query controls. Existing clients are
-unchanged. Core 0.1.9 supplies the subagent event contract and helper.
+Core subagent list/output requests address the emitted run IDs and never expose
+foreign sessions. Local runs support cancellation; remote runs expose final output
+only and reject cancellation. Queries retain runs observed during this activation,
+not a reconstructed historical roster. Core 0.1.9 supplies the shared contracts.
 
 The adapter advertises Core's `_meta.lody.compaction` capability and translates
 Harness `compaction/start` and `compaction/end` events into a standard ACP tool
@@ -42,10 +44,13 @@ endpoint cannot provide a usable list. Without an endpoint, the Harness catalog
 remains advisory: an explicitly configured or selected model is still resolved
 even when it is not listed.
 
-The ACP host mounts Harness's file-backed settings provider. It reads
-`$DSH_HOME/settings.yaml`, falling back to `~/.dsh/settings.yaml`, and exposes
-user sections to settings-aware plugins. Missing settings preserve composition
-defaults; malformed settings documents fail startup instead of being silently ignored.
+Harness is pinned to **0.2.0-rc.2** (npm `latest` at upgrade time). The ACP profile
+reads `llm-deepseek`, `llm-pi-ai`, and `agent-presets.default` from
+`$DSH_HOME/settings.yaml`, falling back to `~/.dsh/settings.yaml`. Model sections
+feed native provider Config schemas. Missing settings preserve defaults; malformed
+documents reject ACP initialization. The native settings migration is disabled:
+it would rename the shared file and move settings into a generated profile.
+This bridge never rewrites or renames the user's settings.
 The `llm-deepseek.models` array replaces the local catalog in full, so retain any
 default models and their vision metadata that should remain selectable. For example:
 
@@ -66,7 +71,7 @@ llm-deepseek:
       name: Custom model
 ```
 
-The provider watches file edits, but ACP model choices are cached per connection.
+Settings are read at startup and ACP model choices are cached per connection.
 Reconnect and refresh the host's model capabilities after catalog edits.
 `DEEPSEEK_BASE_URL` still selects endpoint discovery: this setting does not merge
 local-only model IDs into an endpoint's `/models` response. API credentials remain
@@ -100,7 +105,7 @@ and refresh capabilities after changing the route catalog.
 ## Token and USD accounting
 
 Core's usage capability reports committed request usage, cumulative per-model
-totals and already-included deltas. The pinned Harness 0.1.1-rc.2 supplies usage
+totals and already-included deltas. The pinned Harness supplies usage
 on `assistant/message` and actual route metadata on `request/context`; raw stream
 chunks are not counted again. No model request or transcript is needed by tests.
 Only reported activity in the ACP-owned Harness session is counted; separate
@@ -115,7 +120,7 @@ new `deepseek-flash` price. Unknown models/custom endpoints have no estimated co
 These are list-price estimates, not invoices; cross-boundary requests can differ.
 Only the registered `deepseek-official` route at the official endpoint is priced;
 an arbitrary provider named `deepseek` is not evidence of official billing.
-Publish Core 0.1.5 before releasing this adapter dependency.
+The adapter consumes the published Core 0.1.9 contract.
 
 ## Exports
 
@@ -130,16 +135,21 @@ The host launches the pinned `dsh` executable with
 bundle plus the Lody `cordis.patch.yml` overlay) under
 `$DSH_HOME/profiles/lody-acp`. It stages this package's official
 `standard`/`ptc`/`minimal`/`cordis` preset snapshot beside the ACP adapter.
-Harness mounts the selected preset per session and also discovers user presets
-below `$DSH_HOME/.agent-presets`. MCP tools use Harness's native
+The adapter registers the upstream declarations in the native registry and retains
+legacy user declarations (`preset.yml` plus `agent.cordis.yml`) below
+`$DSH_HOME/.agent-presets`. Built-in names take precedence. Unavailable configured
+defaults fall back to usable Standard mode; explicit selections remain strict.
+Harness binds the selected preset revision per session. MCP tools use Harness's native
 `mcp__<server>__<tool>` naming and are removed with their owning ACP session.
 
 The generated profile defaults session persistence to upstream's `zstd`
 encoding. A host that reuses an existing Harness session root may pass `none`
 to the profile builder only after verifying that the root contains raw
-`session.jsonl` artifacts and no `session.jsonl.zstd` artifacts. Harness roots
+`session[.vN].jsonl` artifacts and no `session[.vN].jsonl.zstd` artifacts. Harness roots
 are single-encoding stores: hosts must refuse mixed roots without moving,
-rewriting, or deleting user artifacts.
+rewriting, or deleting user artifacts. Harness 0.2 writes V4 successors on native
+write-open when migrating supported historical formats, retaining the old files.
+Retained predecessors do not provide automatic downgrade after new turns.
 
 The ACP profile keeps the session-query service mounted for exact reads but sets
 its full-text SQLite index to `openAt: never`. This composition does not expose
@@ -275,7 +285,7 @@ durability checkpoint. Failures release
 the child runtime and MCP reservations; a failed checkpoint error identifies
 the child ID because Harness offers no public deletion operation for a stored
 artifact. Forking does not restore project files or create a Git worktree.
-ACP load/resume remains outside this feature.
+Session restoration is described below; fork still creates a separate native identity.
 
 `npm test` covers ACP routing, capabilities, exact prefixes, configuration,
 failure paths and the durability barrier. The optional native event-store check
@@ -289,3 +299,87 @@ DSH_TEST_RUNTIME_ROOT=/absolute/runtime/node_modules node --test scripts/session
 It verifies prefix reconstruction, compaction surface replacements, source
 isolation and serialized restoration. It does not exercise actual JSONL/zstd
 restart, model continuation, or the compaction model/plugin.
+
+## Session restoration
+
+The adapter advertises `loadSession: true` and `sessionCapabilities.resume: {}`.
+Both `session/load` and `session/resume` use Harness `agents.resume` with the original
+session ID. Harness owns writer locking, disk reconstruction and interrupted-turn
+repair. The adapter requires the persisted cwd, rejects delegated subagent identities
+and duplicate activation, restores the Agent preset and model/reasoning selection,
+and waits for every requested ACP MCP server before returning configuration.
+Missing sessions, unavailable configuration, and setup failures are errors; no fresh
+session or transcript-prompt fallback is created by the adapter.
+
+Load emits the root session's user messages, assistant text/reasoning/images, tool
+lifecycles and titles in log order before its response. Synthetic injected user context
+is not presented as a human message; child-agent transcripts are not reconstructed.
+Missing historical images fail load and release the runtime; resume can still proceed
+because it emits no history. Both paths rebuild usage without emitting historical
+usage increments. The next usage delta contains only new work.
+
+New sessions checkpoint their initial model selection. Model/reasoning changes are
+recorded and flushed even before the next prompt, so a restart preserves that choice.
+Existing logs without a selection use their last request header, or the configured
+default for a blank legacy session. Preset changes remain forbidden after a turn starts.
+
+The native restoration probe runs separate processes over real JSONL and zstd storage,
+with a synthetic model and preset composition. It verifies original identity, interrupted
+turn repair, ordered load replay, silent resume, continued model context and usage:
+
+```sh
+npm run build
+DSH_TEST_RUNTIME_ROOT=/absolute/runtime/node_modules node --test scripts/session-restore-smoke.mjs
+```
+
+Set `DSH_TEST_PREVIOUS_RUNTIME_ROOT` to a separately installed 0.1.5-rc.2
+`node_modules` directory to additionally create old sessions and restore them with
+the current runtime, checking that historical artifacts remain byte-identical.
+
+The settings/profile probe also checks load after close with a retained model and
+permission preset. Real remote models, full subagent-history replay and file rollback
+are not part of these tests.
+
+## Core controls
+
+The generated Harness 0.2.0-rc.2 profile (v18) exposes Core sessionHistory,
+steering, subagents, goal, tasks.background and worktreeProject in addition to
+forkAtTurn, subagentEvents, sessionTitle, compaction and cumulative usage.
+Goal, task and project declarations require their backing service/configuration.
+
+- `session/list` discovers root sessions. `_lody/session/history/read` replays a
+  nonactivated session through an immutable query observation, without writer
+  locks, resume, recovery writes or model calls. History imports prefer this
+  advertised method. Subagent history remains outside the root transcript.
+- `_lody/session/steer` accepts input only during an owned active native turn.
+  Non-waking injection preserves the active request configuration. Durable
+  consumption produces `steer_applied`; rejected/cancelled/idle input cannot
+  silently become another turn. Unsupported request content fails validation.
+- Goal set/resume use prompt `goalControl`; native automatic rounds retain the
+  same ACP prompt until completion, pause, blocking or disarm. Pause/clear use
+  `_lody/session/goal`. Cancel pauses the goal. Native round exhaustion maps to
+  `limited`; no token-budget or elapsed-usage values are invented. Fallback
+  prompt text is ignored for these native controls.
+- Background jobs project owner-scoped task lifecycle without reading the
+  model's output cursor. Preset registration sets native job completion delivery
+  to `quiet`; idle notifications wait for later owned input. Retry waits use Core
+  activity metadata. Standard `usage_update` reports current context pressure,
+  independently of cumulative Core token accounting.
+- `worktreeProject` validates an existing absolute directory and persists an
+  atomic catalog sidecar under `$DSH_HOME/lody-projects`. Listing by original
+  project includes its worktree sessions while preserving each actual `cwd`.
+  Forks inherit the association unless overridden. No execution/permission path
+  uses this metadata; missing metadata retains ordinary cwd association.
+
+Task/output requests require an active root session. Output is a bounded text tail
+(100,000 characters); `tail` limits returned lines. Each run advertises its actual
+stream/output/cancel support. Restored sessions begin a new observed-run roster.
+No account rate-limit windows are available from the API-key composition, and the
+experimental schedule bundle starts independent turns without an ACP ownership
+transport. `rateLimits` and `tasks.scheduled` therefore remain unadvertised.
+
+Native behavioral probe (synthetic model and isolated storage):
+
+```sh
+DSH_TEST_RUNTIME_ROOT=/path/to/pinned/node_modules node --test scripts/core-capabilities-smoke.mjs
+```

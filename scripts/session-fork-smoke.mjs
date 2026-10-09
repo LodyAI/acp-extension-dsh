@@ -13,7 +13,7 @@ const load = (name) => import(pathToFileURL(requireRuntime.resolve(name)).href);
 const { Context } = await load('@deepseek-ai/cordis');
 const { default: SessionStore, Session, SessionId } = await load('@deepseek-ai/dsh-session');
 const { createUserMessage } = await load('@deepseek-ai/dsh-llm');
-assert.equal(requireRuntime('@deepseek-ai/dsh-session/package.json').version, '0.1.5-rc.2');
+assert.equal(requireRuntime('@deepseek-ai/dsh-session/package.json').version, '0.2.0-rc.2');
 
 await test('adapter prefixes reconstruct native history before/after compaction and survive serialization', async () => {
   const ctx = new Context();

@@ -1,3 +1,5 @@
+import { ProjectMetadata } from './project-metadata.js';
+import { goalSnapshot, type GoalService } from './goals.js';
 import {
   forkSnapshot,
   forkTarget,
@@ -9,7 +11,9 @@ import {
   LODY_PLAN_MODE_CONFIG_ID,
   LODY_EXTENSION_METHODS,
   createPlanModeConfigOption,
+  normalizeLodyExtensionMethod,
 } from 'acp-extension-core';
+import { replaySessionHistory, restoredSelection } from './session-history.js';
 import { ToolCallBridge, type ToolPresenter } from './tool-calls.js';
 import { HarnessUsageTracker, type HarnessTokenUsage } from './usage.js';
 import {
@@ -26,7 +30,10 @@ import {
  * per-agent model waterfall and permission-preset service.
  */
 import { createHash, randomUUID } from 'node:crypto';
-import { isAbsolute } from 'node:path';
+import { isAbsolute, join } from 'node:path';
+import { createRequire } from 'node:module';
+import { pathToFileURL } from 'node:url';
+import { readFile, readdir } from 'node:fs/promises';
 import { Readable, Writable } from 'node:stream';
 
 import {
@@ -42,6 +49,9 @@ import {
   type ForkSessionRequest,
   type InitializeRequest,
   type InitializeResponse,
+  type LoadSessionRequest,
+  type ListSessionsRequest,
+  type ResumeSessionRequest,
   type McpServer,
   type NewSessionRequest,
   type NewSessionResponse,
@@ -60,6 +70,8 @@ import type {
   LodyActivityMeta,
   LodyExtensionCapabilities,
   LodySessionMeta,
+  LodySubagentTask,
+  LodyTaskMeta,
 } from 'acp-extension-core';
 import {
   LodySubagentEmitter,
@@ -84,6 +96,9 @@ export const inject = [
   'agents',
   'agentPresets',
   'attachments',
+  'goals',
+  'jobs',
+  'tokenMeter',
   'loader',
   'llm',
   'permissionPresets',
@@ -157,6 +172,8 @@ type HarnessSessionEvent = {
     message?: { content: HarnessMessageBlock[] };
     title?: string;
     source?: { kind: string };
+    contextWindow?: number;
+    retryId?: string;
     compactionId?: string;
     error?: string;
   };
@@ -168,11 +185,16 @@ const LODY_CAPABILITIES = {
   sessionTitle: { version: 1 },
   compaction: { version: 1 },
   usage: { version: 1 },
+  sessionHistory: { version: 1 },
+  steering: { version: 1, transport: 'request', upstreamTurn: 'same', configPolicy: 'active' },
+  subagents: { version: 1, lifecycle: true, list: true, output: true, cancel: true },
 } as const satisfies LodyExtensionCapabilities;
 
 type HarnessSession = {
   id: string;
-  header: { id: string };
+  header: { id: string; cwd?: string; origin?: string; agentPreset?: string };
+  snapshotEvents(): ForkSnapshot['seed'];
+  append(type: 'model/selection', data: ModelSelection): unknown;
 };
 
 type HarnessAgent = {
@@ -182,6 +204,9 @@ type HarnessAgent = {
   followup(message: HarnessUserMessage): void;
   cancel(cause: { kind: 'user' }): void;
   whenIdle(): Promise<void>;
+  status?: string;
+  inject(message: HarnessUserMessage): void;
+  inbox: { remove(id: string): boolean };
 };
 
 type HarnessUserMessage = {
@@ -305,6 +330,10 @@ type HarnessContext = {
       agentOptions: { provider: string; model: string };
       setup(agentContext: HarnessAgentContext): void | Promise<void>;
     }): Promise<HarnessAgentHandle>;
+    resume(options: {
+      resumeSessionId: string;
+      setup(agentContext: HarnessAgentContext, agent: HarnessAgent): Promise<void>;
+    }): Promise<HarnessAgentHandle>;
     get(sessionId: string): HarnessAgent | undefined;
   };
   permissionPresets: {
@@ -332,6 +361,12 @@ export type DeepSeekAcpAdapterConfig = {
   provider?: string;
   model?: string;
   reasoningEffort?: string;
+  /** Directory of bundled declarative presets, registered in the profile scope. */
+  presetRoot?: string;
+  userPresetRoot?: string;
+  /** Legacy settings are validated on initialize, even if a provider failed to mount. */
+  settingsPath?: string;
+  projectMetadataRoot?: string;
   /** Runtime-only transport override used by unit tests. */
   stream?: Stream;
 };
@@ -374,6 +409,12 @@ type SessionRecord = {
   started: boolean;
   outputTail: Promise<void>;
   permissionSyncQueued?: boolean;
+  contextWindow?: number;
+  retries?: Set<string>;
+  steering?: Map<
+    string,
+    { steerId: string; turn: number; resolve(value: { outcome: 'injected' | 'failed' }): void }
+  >;
   inflight?: InflightPrompt;
 };
 
@@ -1129,12 +1170,124 @@ function assertAllowed(value: string, allowed: ReadonlySet<string>, label: strin
   }
 }
 
+/** Background completion must not open a root turn outside an ACP prompt. */
+function configureJobDelivery(rows: unknown[]): void {
+  for (const value of rows) {
+    if (!value || typeof value !== 'object') continue;
+    const row = value as { name?: string; config?: unknown };
+    if (row.name === '@deepseek-ai/dsh-tool-jobs')
+      row.config = { ...((row.config as object) ?? {}), completionDelivery: 'quiet' };
+    if (Array.isArray(row.config)) configureJobDelivery(row.config);
+  }
+}
+
+/** Register vendored YAML in the profile scope so native package resolution remains valid. */
+async function registerBundledPresets(
+  ctx: HarnessContext,
+  root: string,
+  userRoot?: string
+): Promise<void> {
+  const loader = ctx.get('loader') as { import(name: string): Promise<unknown> };
+  const yaml = (await loader.import('js-yaml')) as {
+    load(text: string, options: { schema: unknown }): unknown;
+  };
+  const include = (await loader.import('@deepseek-ai/cordis-plugin-include')) as {
+    entryListSchema: unknown;
+  };
+  const registry = ctx.agentPresets as typeof ctx.agentPresets & {
+    register(definition: { id: string; plugins: unknown[] }): Promise<() => Promise<void>>;
+  };
+  for (const id of ['standard', 'ptc', 'minimal', 'cordis']) {
+    const rows = yaml.load(await readFile(join(root, `${id}.yml`), 'utf8'), {
+      schema: include.entryListSchema,
+    }) as Array<{ config: { id: string; plugins: unknown[] } }>;
+    const definition = rows[0]?.config;
+    if (rows.length !== 1 || definition?.id !== id || !Array.isArray(definition.plugins)) {
+      throw new Error(`Invalid bundled preset: ${id}`);
+    }
+    configureJobDelivery(definition.plugins);
+    const dispose = await registry.register(definition);
+    ctx.effect(() => dispose, `acp-extension-dsh.preset.${id}`);
+  }
+  if (userRoot) {
+    const directories = await readdir(userRoot, { withFileTypes: true }).catch(
+      (error: NodeJS.ErrnoException) => {
+        if (error.code === 'ENOENT') return [];
+        throw error;
+      }
+    );
+    for (const directory of directories) {
+      if (
+        !directory.isDirectory() ||
+        ['standard', 'ptc', 'minimal', 'cordis'].includes(directory.name)
+      )
+        continue;
+      try {
+        const folder = join(userRoot, directory.name);
+        const metadata = yaml.load(await readFile(join(folder, 'preset.yml'), 'utf8'), {
+          schema: include.entryListSchema,
+        }) as { name?: string; description?: string; order?: number };
+        const plugins = yaml.load(await readFile(join(folder, 'agent.cordis.yml'), 'utf8'), {
+          schema: include.entryListSchema,
+        });
+        if (!Array.isArray(plugins)) throw new Error('expected a plugin list');
+        // Legacy presets resolve local files/expressions beside the preset, but
+        // package names through the Harness installation. Preserve both bases.
+        const profile = ctx as HarnessContext & {
+          baseUrl: string;
+          extend(properties: { baseUrl: string }): { agentPresets: typeof registry };
+        };
+        const resolver = createRequire(profile.baseUrl);
+        const resolvePackages = (rows: unknown[]): void => {
+          for (const value of rows) {
+            if (!value || typeof value !== 'object') continue;
+            const row = value as { name?: unknown; group?: boolean; config?: unknown };
+            if (
+              typeof row.name === 'string' &&
+              !row.name.startsWith('.') &&
+              !isAbsolute(row.name) &&
+              !/^[a-z][a-z\d+.-]*:/i.test(row.name)
+            )
+              row.name = pathToFileURL(resolver.resolve(row.name)).href;
+            if (row.group && Array.isArray(row.config)) resolvePackages(row.config);
+          }
+        };
+        configureJobDelivery(plugins);
+        resolvePackages(plugins);
+        const scoped = profile.extend({ baseUrl: pathToFileURL(folder + '/').href });
+        const dispose = await scoped.agentPresets.register({
+          ...metadata,
+          id: directory.name,
+          plugins,
+        });
+        ctx.effect(() => dispose, `acp-extension-dsh.preset.${directory.name}`);
+      } catch (error) {
+        ctx.logger.warn(`user preset ${directory.name} is unavailable: ${errorChain(error)}`);
+      }
+    }
+  }
+}
+
 /** Mount the ACP bridge into the surrounding Harness composition. */
-export function apply(ctx: HarnessContext, rawConfig?: DeepSeekAcpAdapterConfig): void {
+export function apply(
+  ctx: HarnessContext,
+  rawConfig?: DeepSeekAcpAdapterConfig
+): void | Promise<void> {
+  if (rawConfig?.presetRoot) {
+    const { presetRoot, ...config } = rawConfig;
+    return registerBundledPresets(ctx, presetRoot, config.userPresetRoot).then(() =>
+      apply(ctx, config)
+    );
+  }
   const config = resolveAdapterConfig(rawConfig);
+  const projects = rawConfig?.projectMetadataRoot
+    ? new ProjectMetadata(rawConfig.projectMetadataRoot)
+    : undefined;
   const sessions = new Map<string, SessionRecord>();
+  const readingHistory = new Set<string>();
   const activeMcpServerNames = new Set<string>();
   let closed = false;
+  let legacyDefaultPreset: string | undefined;
   let conn: AgentSideConnection;
   let imagePromptEnabled = false;
   let questionCapabilities = { form: false, answerNotes: false };
@@ -1146,11 +1299,15 @@ export function apply(ctx: HarnessContext, rawConfig?: DeepSeekAcpAdapterConfig)
     runs: LodySubagentEmitter;
     nativeId: string;
     agent?: HarnessAgent;
+    parent: HarnessAgent;
     tools?: ToolCallBridge;
     live: boolean;
     mirrors: Set<string>;
+    task: LodySubagentTask;
+    output: string;
   };
   const children = new Map<string, Child>();
+  const childRuns = new Map<string, Child>();
   type ChildInfo = {
     id: string;
     runId: string;
@@ -1165,6 +1322,28 @@ export function apply(ctx: HarnessContext, rawConfig?: DeepSeekAcpAdapterConfig)
   }
   const llm = ctx.get('llm') as HarnessLlmCatalog | undefined;
   if (!llm) throw new Error('acp-extension-dsh: no Harness LLM catalog is mounted');
+  type Job = {
+    id: string;
+    owner?: string;
+    kind: string;
+    label: string;
+    status: string;
+    startedAt: number;
+    finishedAt?: number;
+    detail?: string;
+    progress?: string;
+  };
+  const jobs = ctx.get('jobs') as
+    | {
+        events: {
+          subscribe(
+            filter: { owners: 'all' },
+            callback: (event: { type: string; job?: Job }) => void
+          ): () => void;
+        };
+      }
+    | undefined;
+  const goals = ctx.get('goals') as GoalService<HarnessAgent> | undefined;
   const attachments = ctx.get('attachments') as HarnessAttachmentStore | undefined;
   const baseUrl = process.env[DEEPSEEK_HARNESS_BASE_URL_ENV]?.trim();
   const apiKey = process.env[DEEPSEEK_HARNESS_API_KEY_ENV]?.trim();
@@ -1216,8 +1395,48 @@ export function apply(ctx: HarnessContext, rawConfig?: DeepSeekAcpAdapterConfig)
     inflight?: InflightPrompt
   ): void => enqueueOutput(record, () => notify(notification), inflight);
 
+  if (jobs)
+    ctx.effect(() => {
+      const dispose = jobs.events.subscribe({ owners: 'all' }, (event) => {
+        const job = event.job;
+        if (!job?.owner || event.type === 'removed') return;
+        const record = sessions.get(job.owner);
+        if (!record) return;
+        const status =
+          job.status === 'running' || job.status === 'stopping'
+            ? 'in_progress'
+            : job.status === 'completed'
+              ? 'completed'
+              : 'failed';
+        const task: LodyTaskMeta = {
+          version: 1,
+          kind: job.kind === 'subagent' ? 'subagent' : 'background',
+          taskId: job.id,
+          description: job.label,
+          status,
+          startedAtEpochSeconds: job.startedAt / 1000,
+          ...(job.finishedAt === undefined ? {} : { endedAtEpochSeconds: job.finishedAt / 1000 }),
+          ...(job.detail ? { summary: job.detail } : {}),
+          skipTranscript: true,
+        };
+        enqueueNotification(record, {
+          sessionId: job.owner,
+          update: {
+            sessionUpdate: event.type === 'registered' ? 'tool_call' : 'tool_call_update',
+            toolCallId: `job:${job.id}`,
+            title: job.progress ?? job.label,
+            status,
+            _meta: { lody: { task } },
+          },
+        });
+      });
+      return async () => {
+        dispose();
+      };
+    }, 'acp-extension-dsh.jobs');
+
   ctx.on('subagent/start', function (this: unknown, info: ChildInfo) {
-    if (!subagentEvents || !carrierKeyOf) return;
+    if (!carrierKeyOf) return;
     const parent = carrierKeyOf(this) as HarnessAgent | undefined;
     if (!parent?.session) return;
     const parentChild = children.get(parent.session.id);
@@ -1228,13 +1447,18 @@ export function apply(ctx: HarnessContext, rawConfig?: DeepSeekAcpAdapterConfig)
     let runs = subagentRuns.get(record);
     if (!runs) {
       runs = new LodySubagentEmitter(record.agent.session.id, (event) =>
-        conn.extNotification(LODY_SUBAGENT_EVENT_METHOD, { ...event })
+        subagentEvents
+          ? conn.extNotification(LODY_SUBAGENT_EVENT_METHOD, { ...event })
+          : Promise.resolve()
       );
       subagentRuns.set(record, runs);
     }
     const emitter = runs;
     const previous = children.get(info.id);
-    if (previous?.live)
+    if (previous?.live) {
+      previous.live = false;
+      previous.task.status = 'lost';
+      previous.task.endedAtEpochSeconds = Date.now() / 1000;
       enqueueOutput(record, () =>
         previous.runs.snapshot(previous.nativeId, {
           state: 'unknown',
@@ -1242,14 +1466,25 @@ export function apply(ctx: HarnessContext, rawConfig?: DeepSeekAcpAdapterConfig)
           reason: { code: 'lost' },
         })
       );
+    }
     const agent = info.local ? ctx.agents.get(info.id) : undefined;
     const child: Child = {
       record,
       runs: emitter,
       nativeId: info.runId,
       agent,
+      parent,
       live: true,
       mirrors: new Set(),
+      output: '',
+      task: {
+        taskId: info.runId,
+        agentId: info.id,
+        description: info.provider,
+        status: 'running',
+        startedAtEpochSeconds: Date.now() / 1000,
+        endedAtEpochSeconds: null,
+      },
     };
     if (agent)
       child.tools = new ToolCallBridge({
@@ -1283,24 +1518,47 @@ export function apply(ctx: HarnessContext, rawConfig?: DeepSeekAcpAdapterConfig)
         warn: (message) => ctx.logger.warn(`acp-extension-dsh: ${message}`),
       });
     children.set(info.id, child);
-    enqueueOutput(record, () =>
-      emitter.start(info.runId, {
+
+    enqueueOutput(record, async () => {
+      await emitter.start(info.runId, {
         state: 'running',
         name: info.provider,
         parentRunId: parentChild ? emitter.get(parentChild.nativeId)?.runId : null,
         support: {
           stream: agent ? ['text', 'thought', 'tool'] : [],
           progress: false,
-          outputRead: 'none',
-          cancel: false,
+          outputRead: agent ? 'live_tail' : 'final_tail',
+          cancel: !!agent,
         },
-      })
-    );
+      });
+      child.task.taskId = emitter.get(info.runId)!.runId;
+      childRuns.set(child.task.taskId, child);
+    });
   });
   ctx.on('subagent/end', (info: ChildInfo) => {
     const child = children.get(info.id);
     if (!child?.live || child.nativeId !== info.runId) return;
     child.live = false;
+    child.task.status =
+      info.stopReason === 'completed'
+        ? 'completed'
+        : info.stopReason === 'aborted'
+          ? 'killed'
+          : info.stopReason === 'error' ||
+              info.stopReason === 'max-tokens' ||
+              info.stopReason === 'refusal'
+            ? 'failed'
+            : 'lost';
+    child.task.endedAtEpochSeconds = Date.now() / 1000;
+    child.task.stopReason = info.stopReason;
+    if (!child.agent)
+      child.output =
+        info.lastAssistantMessage
+          ?.flatMap((block) =>
+            block.type === 'text' && 'text' in block ? [String(block.text)] : []
+          )
+          .join('\n') ?? '';
+    child.output = child.output.slice(-100_000);
     enqueueOutput(child.record, async () => {
       await child.tools?.interrupt();
       await child.runs.snapshot(info.runId, {
@@ -1333,13 +1591,75 @@ export function apply(ctx: HarnessContext, rawConfig?: DeepSeekAcpAdapterConfig)
       throw new Error('no session durability listener is available');
   };
 
+  ctx.on('goal/activation-changed', ({ sessionId }: { sessionId: string }) => {
+    const record = sessions.get(sessionId);
+    if (record)
+      enqueueNotification(record, {
+        sessionId,
+        update: {
+          sessionUpdate: 'session_info_update',
+          _meta: { lody: { goal: goalSnapshot(goals?.get(record.agent)) } },
+        },
+      });
+  });
+
+  const pauseGoal = (record: SessionRecord) => {
+    const goal = goals?.get(record.agent);
+    if (goal?.phase === 'active') goals!.pause(record.agent, goal);
+  };
+  const waitForGoal = async (record: SessionRecord) => {
+    for (;;) {
+      await record.agent.whenIdle();
+      let wake!: () => void;
+      const changed = new Promise<void>((resolve) => {
+        wake = resolve;
+      });
+      const disposers = [
+        ctx.on('goal/changed', ({ agent }: { agent: HarnessAgent }) => {
+          if (agent === record.agent) wake();
+        }),
+        ctx.on('goal/activation-changed', ({ sessionId }: { sessionId: string }) => {
+          if (sessionId === record.agent.id) wake();
+        }),
+        ctx.on('agent/status', ({ agent }: { agent: HarnessAgent }) => {
+          if (agent === record.agent) wake();
+        }),
+      ];
+      try {
+        const goal = goals?.get(record.agent);
+        if (
+          record.inflight?.cancelRequested ||
+          goal?.phase !== 'active' ||
+          goal.activation !== 'armed'
+        )
+          return;
+        await changed;
+      } finally {
+        for (const dispose of disposers) dispose();
+      }
+    }
+  };
+
+  const discardSteering = (record: SessionRecord) => {
+    for (const [id, pending] of record.steering ?? []) {
+      try {
+        record.agent.inbox.remove(id);
+      } catch (error) {
+        ctx.logger.warn(`steering cleanup failed: ${errorChain(error)}`);
+      }
+      pending.resolve({ outcome: 'failed' });
+    }
+    record.steering?.clear();
+  };
+
   const settleAfterQuiescence = (record: SessionRecord, inflight: InflightPrompt): void => {
     if (inflight.settlementStarted) return;
     inflight.settlementStarted = true;
     void (async () => {
       await inflight.admissionDone;
       if (inflight.messageQueued) {
-        await record.agent.whenIdle();
+        await waitForGoal(record);
+        discardSteering(record);
         await record.outputTail;
         await record.tools.interrupt();
         // A fork can run in another ACP process: complete the prompt only
@@ -1367,6 +1687,7 @@ export function apply(ctx: HarnessContext, rawConfig?: DeepSeekAcpAdapterConfig)
     })().catch((error: unknown) => {
       if (record.inflight !== inflight) return;
       record.inflight = undefined;
+      discardSteering(record);
       inflight.reject(internalError(`prompt settlement failed: ${errorChain(error)}`));
     });
   };
@@ -1428,6 +1749,12 @@ export function apply(ctx: HarnessContext, rawConfig?: DeepSeekAcpAdapterConfig)
       }
     }
     const results = await Promise.allSettled(records.map((record) => record.dispose()));
+    await Promise.all(records.map((record) => record.outputTail));
+    const disposed = new Set(records);
+    for (const [id, child] of childRuns) if (disposed.has(child.record)) childRuns.delete(id);
+    for (const [id, child] of children) if (disposed.has(child.record)) children.delete(id);
+    for (const record of records) subagentRuns.delete(record);
+
     const failures = results
       .filter((result): result is PromiseRejectedResult => result.status === 'rejected')
       .map((result) => result.reason as unknown);
@@ -1498,6 +1825,8 @@ export function apply(ctx: HarnessContext, rawConfig?: DeepSeekAcpAdapterConfig)
           await child.tools?.event(event.type, event.data);
         if (event.type === 'assistant/message')
           for (const block of event.data.message?.content ?? []) {
+            if (block.type === 'text' && 'text' in block)
+              child.output = (child.output + String(block.text) + '\n').slice(-100_000);
             const content = await assistantBlockToAcp(block, attachments);
             await child.runs.output(
               child.nativeId,
@@ -1510,6 +1839,91 @@ export function apply(ctx: HarnessContext, rawConfig?: DeepSeekAcpAdapterConfig)
     }
     const record = sessions.get(session.header.id);
     if (!record || record.agent.session !== session) return;
+    if (event.type === 'request/context') record.contextWindow = event.data.contextWindow;
+    if (
+      ['request/context', 'assistant/message', 'compaction/end'].includes(event.type) &&
+      record.contextWindow &&
+      record.contextWindow > 0
+    ) {
+      const meter = ctx.get('tokenMeter') as
+        { measure(session: HarnessSession): { totalTokens: number } } | undefined;
+      if (meter) {
+        const used = meter.measure(session).totalTokens;
+        if (Number.isFinite(used) && used >= 0)
+          enqueueNotification(record, {
+            sessionId: session.id,
+            update: {
+              sessionUpdate: 'usage_update',
+              used: Math.ceil(used),
+              size: record.contextWindow,
+            },
+          });
+      }
+    }
+    if (event.type === 'llm/retry' && event.data.retryId) {
+      (record.retries ??= new Set()).add(event.data.retryId);
+      enqueueNotification(record, {
+        sessionId: session.id,
+        update: {
+          sessionUpdate: 'tool_call',
+          toolCallId: `retry:${event.data.retryId}`,
+          title: 'Waiting to retry model request',
+          kind: 'think',
+          status: 'in_progress',
+          _meta: { lody: { activity: { version: 1, kind: 'retry', automatic: true } } },
+        },
+      });
+    }
+    if (event.type === 'llm/retry-started' || event.type === 'turn/end') {
+      for (const id of record.retries ?? []) {
+        if (event.type !== 'turn/end' && id !== event.data.retryId) continue;
+        const failed = event.type === 'turn/end';
+        enqueueNotification(record, {
+          sessionId: session.id,
+          update: {
+            sessionUpdate: 'tool_call_update',
+            toolCallId: `retry:${id}`,
+            status: failed ? 'failed' : 'completed',
+            _meta: {
+              lody: {
+                activity: {
+                  version: 1,
+                  kind: 'retry',
+                  automatic: true,
+                  ...(failed ? { failureReason: 'Turn ended before retry' } : {}),
+                },
+              },
+            },
+          },
+        });
+        record.retries!.delete(id);
+      }
+    }
+    if (event.type === 'user/message') {
+      const id = (event.data as Record<string, unknown>).id;
+      const pending = typeof id === 'string' ? record.steering?.get(id) : undefined;
+      if (pending) {
+        record.steering!.delete(id as string);
+        enqueueOutput(record, async () => {
+          try {
+            await conn.extNotification(LODY_EXTENSION_METHODS.sessionSteerApplied, {
+              sessionId: session.id,
+              steerId: pending.steerId,
+            });
+          } finally {
+            pending.resolve({ outcome: 'injected' });
+          }
+        });
+      }
+    }
+    if (event.type === 'goal/change')
+      enqueueNotification(record, {
+        sessionId: session.id,
+        update: {
+          sessionUpdate: 'session_info_update',
+          _meta: { lody: { goal: goalSnapshot(goals?.get(record.agent)) } },
+        },
+      });
     if (event.type === 'session/title' && typeof event.data.title === 'string') {
       const source = event.data.source?.kind;
       const titleSource: LodySessionMeta['titleSource'] =
@@ -1629,12 +2043,47 @@ export function apply(ctx: HarnessContext, rawConfig?: DeepSeekAcpAdapterConfig)
   });
 
   ctx.on(
+    'agent/pre-step',
+    async (
+      { agent, turn }: { agent: HarnessAgent; turn: number },
+      next: () => Promise<{ kind: 'reject' } | { kind: 'enter'; messages: HarnessUserMessage[] }>
+    ) => {
+      const record = ownedRecord(agent);
+      if (record && (!record.inflight || record.inflight.cancelRequested))
+        return { kind: 'reject' };
+      const decision = await next();
+      if (!record || decision.kind !== 'enter') return decision;
+      const messages = decision.messages.filter((message) => {
+        const pending = record.steering?.get(message.id);
+        if (!pending || pending.turn === turn) return true;
+        record.steering!.delete(message.id);
+        pending.resolve({ outcome: 'failed' });
+        return false;
+      });
+      return { ...decision, messages };
+    }
+  );
+
+  ctx.on(
     'agent/inbox/claimed',
-    ({ agent, message, turn }: { agent: HarnessAgent; message: { id: string }; turn: number }) => {
+    ({
+      agent,
+      message,
+      turn,
+    }: {
+      agent: HarnessAgent;
+      message: { id: string; source?: { kind: string } };
+      turn: number;
+    }) => {
       const record = ownedRecord(agent);
       const inflight = record?.inflight;
-      if (record && inflight && inflight.messageId === message.id) {
+      if (
+        record &&
+        inflight &&
+        (inflight.messageId === message.id || message.source?.kind === 'goal')
+      ) {
         inflight.turn = turn;
+        inflight.endReason = undefined;
         enqueueNotification(
           record,
           {
@@ -1786,7 +2235,10 @@ export function apply(ctx: HarnessContext, rawConfig?: DeepSeekAcpAdapterConfig)
             model: selected.model,
             ...(reasoningEffort ? { reasoningEffort } : {}),
           };
-          return { configOptions: configOptions(record) };
+          record.agent.session.append('model/selection', record.selection.current);
+          return flushSession(record.agent.session).then(() => ({
+            configOptions: configOptions(record),
+          }));
         })
         .catch((error: unknown) => {
           if (error instanceof RequestError) throw error;
@@ -1805,6 +2257,10 @@ export function apply(ctx: HarnessContext, rawConfig?: DeepSeekAcpAdapterConfig)
         ...record.selection.current,
         reasoningEffort,
       };
+      record.agent.session.append('model/selection', record.selection.current);
+      return flushSession(record.agent.session).then(() => ({
+        configOptions: configOptions(record),
+      }));
     } else {
       throw invalidParams(`unknown config option: ${params.configId}`);
     }
@@ -1813,10 +2269,16 @@ export function apply(ctx: HarnessContext, rawConfig?: DeepSeekAcpAdapterConfig)
 
   const createSession = async (
     params: NewSessionRequest,
-    fork?: ForkSnapshot
+    fork?: ForkSnapshot,
+    restore?: { sessionId: string; replay: boolean }
   ): Promise<NewSessionResponseWithModels> => {
     assertOpen();
     validateSessionParams(params);
+    const projectInput = (params._meta?.lody as LodySessionMeta | undefined)?.worktreeProject;
+    if (projectInput && !projects) throw invalidParams('worktreeProject is unavailable');
+    const project =
+      (await projects?.validate(projectInput)) ??
+      (fork ? await projects?.read(fork.sourceId) : undefined);
     let catalog: HarnessModelCatalog;
     try {
       catalog = await loadModelCatalog();
@@ -1837,7 +2299,7 @@ export function apply(ctx: HarnessContext, rawConfig?: DeepSeekAcpAdapterConfig)
       if (index < 0) models.push(model);
       else models[index] = model;
     }
-    const sessionId = randomUUID();
+    const sessionId = restore?.sessionId ?? randomUUID();
     const questions = new UserQuestionBridge(
       sessionId,
       (request) => conn.unstable_createElicitation(request),
@@ -1858,12 +2320,25 @@ export function apply(ctx: HarnessContext, rawConfig?: DeepSeekAcpAdapterConfig)
         ...(reasoningEffort ? { reasoningEffort } : {}),
       },
     };
-    const agentPresetOptions = (await ctx.agentPresets.list()).filter(
-      (preset) => preset.broken === undefined
-    );
-    const requestedPreset = fork?.agentPreset ?? ctx.agentPresets.defaultId;
-    if (!agentPresetOptions.some((preset) => preset.id === requestedPreset)) {
-      throw internalError(`default agent preset ${JSON.stringify(requestedPreset)} is unavailable`);
+    const presetRoster = await ctx.agentPresets.list();
+    const agentPresetOptions = presetRoster.filter((preset) => preset.broken === undefined);
+    let requestedPreset = fork?.agentPreset ?? legacyDefaultPreset ?? ctx.agentPresets.defaultId;
+    let restoredEvents: ForkSnapshot['seed'] = [];
+    if (
+      !restore &&
+      !fork &&
+      !agentPresetOptions.some((preset) => preset.id === requestedPreset) &&
+      agentPresetOptions.some((preset) => preset.id === 'standard')
+    ) {
+      ctx.logger.warn(
+        `default agent preset ${JSON.stringify(requestedPreset)} is unavailable; using standard`
+      );
+      requestedPreset = 'standard';
+    }
+    if (!restore && !agentPresetOptions.some((preset) => preset.id === requestedPreset)) {
+      throw internalError(
+        `default agent preset ${JSON.stringify(requestedPreset)} is unavailable: ${presetRoster.find((preset) => preset.id === requestedPreset)?.broken ?? 'not registered'}`
+      );
     }
     const mcpServerNames = reserveMcpServerNames(
       params.mcpServers,
@@ -1873,49 +2348,90 @@ export function apply(ctx: HarnessContext, rawConfig?: DeepSeekAcpAdapterConfig)
     let mountedPreset = requestedPreset;
     let handle: HarnessAgentHandle;
     try {
-      handle = await ctx.agents.create({
-        sessionId,
-        meta: {
-          cwd: params.cwd,
-          agentPreset: requestedPreset,
-          ...(fork ? { parentSession: fork.sourceId, isSeeded: true } : {}),
-        },
-        ...(fork ? { seed: fork.seed, inheritedEventCount: fork.seed.length } : {}),
-        agentOptions: {
-          provider: initialSelection.provider,
-          model: initialSelection.model,
-        },
-        setup: async (agentContext) => {
-          if (subagentEvents && !carrierKeyOf) {
-            const scope = (await agentContext.loader.import('@deepseek-ai/dsh-scope')) as {
-              carrierKeyOf?: (carrier: unknown) => unknown;
-            };
-            if (typeof scope.carrierKeyOf !== 'function')
-              throw new Error('Harness scope identity API is unavailable');
-            carrierKeyOf = scope.carrierKeyOf;
+      const setup = async (agentContext: HarnessAgentContext, restoredAgent?: HarnessAgent) => {
+        if (restore) {
+          if (!restoredAgent || restoredAgent.session.id !== sessionId)
+            throw internalError('native resume returned a different session');
+          const session = restoredAgent.session;
+          if (session.header.origin === 'subagent')
+            throw invalidParams('subagent sessions cannot be resumed as ACP root sessions');
+          if (session.header.cwd !== params.cwd)
+            throw invalidParams('resume cwd must match the persisted session cwd');
+          // Inspect the repaired log under the native writer claim, not a stale query snapshot.
+          restoredEvents = structuredClone(session.snapshotEvents());
+          requestedPreset =
+            ([...restoredEvents]
+              .reverse()
+              .find(
+                (event) =>
+                  event.type === 'agent-preset/selected' &&
+                  typeof event.data.agentPreset === 'string'
+              )?.data.agentPreset as string | undefined) ??
+            session.header.agentPreset ??
+            ctx.agentPresets.defaultId;
+          if (!agentPresetOptions.some((preset) => preset.id === requestedPreset))
+            throw invalidParams('persisted agent preset is unavailable');
+          const restoredModel = restoredSelection(restoredEvents);
+          if (restoredModel) {
+            const model = await resolveHarnessModel(
+              llm,
+              restoredModel.provider,
+              restoredModel.model
+            );
+            const index = models.findIndex(
+              (candidate) => candidate.provider === model.provider && candidate.id === model.id
+            );
+            if (index < 0) models.push(model);
+            else models[index] = model;
+            selection.current = restoredModel;
+            if (restoredModel.reasoningEffort)
+              resolveReasoningEffort(model, restoredModel.reasoningEffort);
           }
-          installModelSelection(agentContext, selection);
-          agentContext.on(
-            'user-questions/request',
-            (
-              request: HarnessQuestionRequest & { agent?: HarnessAgent },
-              next: () => Promise<HarnessQuestionAnswer>
-            ) => {
-              // Harness userQuestions.ask owns exact-live/root validation. Only
-              // claim this ACP session's Agent; never answer unowned callers.
-              if (!request.agent || ownedRecord(request.agent)?.questions !== questions)
-                return next();
-              return questions.ask(request);
-            }
-          );
-          mountedPreset = (await ctx.agentPresets.mount(agentContext, requestedPreset)).id;
-          await mountMcpServers(agentContext, params.mcpServers, mcpServerNames.names, params.cwd);
-        },
-      });
+        }
+        if ((subagentEvents || ctx.get('subagents')) && !carrierKeyOf) {
+          const scope = (await agentContext.loader.import('@deepseek-ai/dsh-scope')) as {
+            carrierKeyOf?: (carrier: unknown) => unknown;
+          };
+          if (typeof scope.carrierKeyOf !== 'function')
+            throw new Error('Harness scope identity API is unavailable');
+          carrierKeyOf = scope.carrierKeyOf;
+        }
+        installModelSelection(agentContext, selection);
+        agentContext.on(
+          'user-questions/request',
+          (
+            request: HarnessQuestionRequest & { agent?: HarnessAgent },
+            next: () => Promise<HarnessQuestionAnswer>
+          ) => {
+            // Harness userQuestions.ask owns exact-live/root validation. Only
+            // claim this ACP session's Agent; never answer unowned callers.
+            if (!request.agent || ownedRecord(request.agent)?.questions !== questions)
+              return next();
+            return questions.ask(request);
+          }
+        );
+        mountedPreset = (await ctx.agentPresets.mount(agentContext, requestedPreset)).id;
+        await mountMcpServers(agentContext, params.mcpServers, mcpServerNames.names, params.cwd);
+      };
+      handle = restore
+        ? await ctx.agents.resume({ resumeSessionId: sessionId, setup })
+        : await ctx.agents.create({
+            sessionId,
+            meta: {
+              cwd: params.cwd,
+              agentPreset: requestedPreset,
+              ...(fork ? { parentSession: fork.sourceId, isSeeded: true } : {}),
+            },
+            ...(fork ? { seed: fork.seed, inheritedEventCount: fork.seed.length } : {}),
+            agentOptions: { provider: initialSelection.provider, model: initialSelection.model },
+            setup,
+          });
     } catch (error: unknown) {
       mcpServerNames.release();
       if (error instanceof RequestError) throw error;
-      throw internalError(`failed to create session: ${errorChain(error)}`);
+      throw internalError(
+        `failed to ${restore ? 'resume' : 'create'} session: ${errorChain(error)}`
+      );
     }
     const dispose = async (): Promise<void> => {
       questions.cancel();
@@ -1927,7 +2443,7 @@ export function apply(ctx: HarnessContext, rawConfig?: DeepSeekAcpAdapterConfig)
     };
     if (closed) {
       await dispose();
-      throw internalError('connection closed during session/new');
+      throw internalError('connection closed during session establishment');
     }
     let permissionMode: string;
     let permissionOptions: HarnessPermissionOption[];
@@ -1948,7 +2464,10 @@ export function apply(ctx: HarnessContext, rawConfig?: DeepSeekAcpAdapterConfig)
           return tools?.get(name, handle.agent);
         },
         content: (block) => assistantBlockToAcp(block as HarnessMessageBlock, attachments),
-        emit: (update) => notify({ sessionId, update }),
+        emit: (update) =>
+          restore?.replay && !sessions.has(sessionId)
+            ? conn.sessionUpdate({ sessionId, update })
+            : notify({ sessionId, update }),
         warn: (message) => ctx.logger.warn(`acp-extension-dsh: ${message}`),
       }),
       questions,
@@ -1963,11 +2482,14 @@ export function apply(ctx: HarnessContext, rawConfig?: DeepSeekAcpAdapterConfig)
       agentPreset: mountedPreset,
       agentPresetOptions,
       models,
-      started: fork?.seed.some((event) => event.type === 'turn/start') ?? false,
+      started:
+        (restore ? restoredEvents : fork?.seed)?.some((event) => event.type === 'turn/start') ??
+        false,
       outputTail: Promise.resolve(),
     };
-    if (fork) {
+    if (!restore) {
       try {
+        if (!fork) handle.agent.session.append('model/selection', selection.current);
         await flushSession(handle.agent.session);
         assertOpen();
       } catch (error: unknown) {
@@ -1978,11 +2500,47 @@ export function apply(ctx: HarnessContext, rawConfig?: DeepSeekAcpAdapterConfig)
           cleanupError = failure;
         }
         throw internalError(
-          `fork child ${sessionId} could not be committed: ${errorChain(error)}${cleanupError ? `; cleanup: ${errorChain(cleanupError)}` : ''}`
+          `${fork ? 'fork child' : 'session'} ${sessionId} could not be committed: ${errorChain(error)}${cleanupError ? `; cleanup: ${errorChain(cleanupError)}` : ''}`
         );
       }
     }
+    if (restore) {
+      try {
+        await replaySessionHistory(restoredEvents, {
+          sessionId,
+          replay: restore.replay,
+          tools: record.tools,
+          usage: record.usage,
+          content: (block) => assistantBlockToAcp(block as HarnessMessageBlock, attachments),
+          emit: async (update) => {
+            await conn.sessionUpdate({ sessionId, update });
+          },
+        });
+        assertOpen();
+      } catch (error: unknown) {
+        await dispose();
+        throw internalError(`failed to restore session history: ${errorChain(error)}`);
+      }
+    }
+    if (project && projects) {
+      try {
+        await projects.write(sessionId, project);
+      } catch (error) {
+        await dispose();
+        throw error;
+      }
+    }
     sessions.set(sessionId, record);
+    if (goals) {
+      enqueueNotification(record, {
+        sessionId,
+        update: {
+          sessionUpdate: 'session_info_update',
+          _meta: { lody: { goal: goalSnapshot(goals.get(record.agent)) } },
+        },
+      });
+      await record.outputTail;
+    }
     return {
       sessionId,
       modes: modeState(record),
@@ -1991,10 +2549,76 @@ export function apply(ctx: HarnessContext, rawConfig?: DeepSeekAcpAdapterConfig)
     };
   };
 
+  const restoring = new Set<string>();
+  const restoreSession = async (
+    params: LoadSessionRequest | ResumeSessionRequest,
+    replay: boolean
+  ) => {
+    assertOpen();
+    if (
+      sessions.has(params.sessionId) ||
+      restoring.has(params.sessionId) ||
+      readingHistory.has(params.sessionId) ||
+      ctx.agents.get(params.sessionId)
+    )
+      throw invalidParams('session is already active or being restored');
+    restoring.add(params.sessionId);
+    try {
+      const { sessionId: _sessionId, ...response } = await createSession(
+        { ...params, mcpServers: params.mcpServers ?? [] },
+        undefined,
+        { sessionId: params.sessionId, replay }
+      );
+      return response;
+    } finally {
+      restoring.delete(params.sessionId);
+    }
+  };
+
   const makeAgent = (connection: AgentSideConnection): AcpAgent => {
     conn = connection;
     return {
       async initialize(_params: InitializeRequest): Promise<InitializeResponse> {
+        // Preset declarations and provider configuration activate independently of
+        // the registry service. Do not answer the first request before they settle.
+        const loader = ctx.get('loader') as { await(): Promise<void> } | undefined;
+        await loader?.await();
+        if (rawConfig?.settingsPath) {
+          let source: string | undefined;
+          try {
+            source = await readFile(rawConfig.settingsPath, 'utf8');
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+          }
+          if (source !== undefined) {
+            const importer = ctx.get('loader') as { import(name: string): Promise<unknown> };
+            const yaml = (await importer.import('js-yaml')) as { load(text: string): unknown };
+            try {
+              const document = yaml.load(source) ?? {};
+              if (typeof document !== 'object' || Array.isArray(document))
+                throw new Error('expected a mapping');
+              for (const namespace of ['llm-deepseek', 'llm-pi-ai', 'agent-presets']) {
+                const section = (document as Record<string, unknown>)[namespace];
+                if (section != null && (typeof section !== 'object' || Array.isArray(section)))
+                  throw new Error(`${namespace} must be a mapping`);
+              }
+              const defaultPreset = (
+                (document as Record<string, unknown>)['agent-presets'] as
+                  { default?: unknown } | undefined
+              )?.default;
+              if (
+                defaultPreset !== undefined &&
+                (typeof defaultPreset !== 'string' || !defaultPreset.trim())
+              )
+                throw new Error('invalid default preset');
+              legacyDefaultPreset = defaultPreset as string | undefined;
+            } catch {
+              throw invalidParams(
+                'settings.yaml is invalid; expected YAML model configuration mappings'
+              );
+            }
+          }
+        }
         subagentEvents = supportsLodySubagentEvents(_params.clientCapabilities);
         const elicitation = _params.clientCapabilities?._meta?.lody;
         const notes =
@@ -2030,8 +2654,25 @@ export function apply(ctx: HarnessContext, rawConfig?: DeepSeekAcpAdapterConfig)
               embeddedContext: false,
             },
             mcpCapabilities: { http: true },
-            sessionCapabilities: { close: {}, fork: {} },
-            _meta: { lody: LODY_CAPABILITIES },
+            loadSession: true,
+            sessionCapabilities: { close: {}, fork: {}, resume: {}, list: {} },
+            _meta: {
+              lody: {
+                ...LODY_CAPABILITIES,
+                ...(projects ? { worktreeProject: { version: 1 } } : {}),
+                ...(jobs ? { tasks: { version: 1, background: true } } : {}),
+                ...(goals
+                  ? {
+                      goal: {
+                        version: 1,
+                        actions: ['set', 'pause', 'resume', 'clear'],
+                        controlActions: ['pause', 'clear'],
+                        promptActions: ['set', 'resume'],
+                      },
+                    }
+                  : {}),
+              },
+            },
           },
           authMethods: [],
         };
@@ -2045,6 +2686,201 @@ export function apply(ctx: HarnessContext, rawConfig?: DeepSeekAcpAdapterConfig)
         return createSession(params);
       },
 
+      loadSession(params: LoadSessionRequest) {
+        return restoreSession(params, true);
+      },
+
+      resumeSession(params: ResumeSessionRequest) {
+        return restoreSession(params, false);
+      },
+
+      async listSessions(params: ListSessionsRequest) {
+        assertOpen();
+        if (params.cursor) throw invalidParams('session/list cursor is unsupported');
+        const query = ctx.get('sessionQuery') as {
+          listSessions(): Promise<Array<{ header: { id: string; cwd?: string; origin?: string } }>>;
+        };
+        const rows = await query.listSessions();
+        const result = [];
+        for (const { header } of rows) {
+          if (header.origin === 'subagent' || !header.cwd) continue;
+          const project = await projects?.read(header.id);
+          if (params.cwd && params.cwd !== header.cwd && params.cwd !== project?.originProjectPath)
+            continue;
+          result.push({
+            sessionId: header.id,
+            cwd: header.cwd,
+            ...(project ? { _meta: { lody: { worktreeProject: project } } } : {}),
+          });
+        }
+        return { sessions: result };
+      },
+
+      async extMethod(method, params) {
+        assertOpen();
+        const methodName = normalizeLodyExtensionMethod(method);
+        const sessionId = params.sessionId;
+        if (typeof sessionId !== 'string' || !sessionId)
+          throw invalidParams('sessionId is required');
+        if (methodName === LODY_EXTENSION_METHODS.sessionGoal) {
+          const record = requireSession(sessionId);
+          if (!goals) throw invalidParams('goals are unavailable');
+          if (params.action !== 'pause' && params.action !== 'clear')
+            throw invalidParams('set/resume require session/prompt goalControl');
+          const goal = goals.get(record.agent);
+          if (goal) {
+            if (params.action === 'pause') pauseGoal(record);
+            else goals.clear(record.agent, goal);
+          }
+          await flushSession(record.agent.session);
+          await record.outputTail;
+          return { goal: goalSnapshot(goals.get(record.agent)) };
+        }
+        if (methodName === LODY_EXTENSION_METHODS.sessionSteer) {
+          const record = requireSession(sessionId);
+          if (
+            typeof params.steerId !== 'string' ||
+            !params.steerId ||
+            !Array.isArray(params.prompt)
+          )
+            throw invalidParams('invalid steering request');
+          const inflight = record.inflight;
+          if (
+            !inflight ||
+            inflight.cancelRequested ||
+            inflight.turn === undefined ||
+            inflight.endReason ||
+            record.agent.status !== 'running'
+          )
+            return { outcome: 'failed' };
+          const nativeTurn = inflight.turn;
+          const content = await admitAcpPrompt(
+            params.prompt as ContentBlock[],
+            llm,
+            record.selection.assembled ?? record.selection.current,
+            attachments,
+            imagePromptEnabled,
+            inflight.admissionController.signal
+          );
+          if (
+            record.inflight !== inflight ||
+            inflight.turn !== nativeTurn ||
+            inflight.cancelRequested ||
+            inflight.endReason ||
+            record.agent.status !== 'running'
+          )
+            return { outcome: 'failed' };
+          record.steering ??= new Map();
+          if ([...record.steering.values()].some((value) => value.steerId === params.steerId))
+            throw invalidParams('duplicate steerId');
+          const id = randomUUID();
+          return new Promise<{ outcome: 'injected' | 'failed' }>((resolve, reject) => {
+            record.steering!.set(id, {
+              steerId: params.steerId as string,
+              turn: inflight.turn!,
+              resolve,
+            });
+            try {
+              record.agent.inject(createUserMessage(id, content));
+            } catch (error) {
+              record.steering!.delete(id);
+              reject(error);
+            }
+          });
+        }
+        if (methodName === LODY_EXTENSION_METHODS.sessionHistoryRead) {
+          if (sessions.has(sessionId) || restoring.has(sessionId) || readingHistory.has(sessionId))
+            throw invalidParams('history reader cannot replay an activated session');
+          const query = ctx.get('sessionQuery') as {
+            observeSession(
+              id: string
+            ): Promise<ForkObservation & { header: { cwd?: string; origin?: string } }>;
+          };
+          readingHistory.add(sessionId);
+          const observation = await query.observeSession(sessionId).catch((error) => {
+            readingHistory.delete(sessionId);
+            throw error;
+          });
+          try {
+            if (
+              observation.header.id !== sessionId ||
+              observation.header.origin === 'subagent' ||
+              !observation.header.cwd
+            )
+              throw invalidParams('not a root session');
+            const emit = async (update: SessionNotification['update']) => {
+              await conn.sessionUpdate({ sessionId, update });
+            };
+            const content = (block: { type: string }) =>
+              assistantBlockToAcp(block as HarnessMessageBlock, attachments);
+            const tools = new ToolCallBridge({
+              cwd: observation.header.cwd,
+              lookup: () => undefined,
+              content,
+              emit,
+              warn: (message) => ctx.logger.warn(message),
+            });
+            await replaySessionHistory(observation.events, {
+              sessionId,
+              replay: true,
+              tools,
+              usage: new HarnessUsageTracker(false),
+              content,
+              emit,
+            });
+            await tools.interrupt();
+            return {};
+          } finally {
+            observation[Symbol.dispose]();
+            readingHistory.delete(sessionId);
+          }
+        }
+        if (
+          methodName === LODY_EXTENSION_METHODS.subagentsList ||
+          methodName === LODY_EXTENSION_METHODS.subagentsOutput ||
+          methodName === LODY_EXTENSION_METHODS.subagentsCancel
+        ) {
+          const record = requireSession(sessionId);
+          await record.outputTail;
+          if (methodName === LODY_EXTENSION_METHODS.subagentsList) {
+            if (params.activeOnly !== undefined && typeof params.activeOnly !== 'boolean')
+              throw invalidParams('activeOnly must be boolean');
+            return {
+              tasks: [...childRuns.values()]
+                .filter((child) => child.record === record && (!params.activeOnly || child.live))
+                .map((child) => ({ ...child.task })),
+            };
+          }
+          const child =
+            typeof params.taskId === 'string' ? childRuns.get(params.taskId) : undefined;
+          if (!child || child.record !== record) throw invalidParams('unknown subagent task');
+          if (methodName === LODY_EXTENSION_METHODS.subagentsCancel) {
+            if (!child.live) return {};
+            if (!child.agent || ctx.agents.get(child.agent.id) !== child.agent)
+              throw invalidParams('this subagent cannot be cancelled by the ACP bridge');
+            child.agent.cancel({ kind: 'user' });
+            const service = ctx.get('subagents') as
+              | { drainContinuableChildren(parent: HarnessAgent, ids: string[]): Promise<void> }
+              | undefined;
+            await service?.drainContinuableChildren(child.parent, [child.agent.id]);
+            return {};
+          }
+          const tail = params.tail;
+          if (
+            tail !== undefined &&
+            (typeof tail !== 'number' || !Number.isSafeInteger(tail) || tail < 1)
+          )
+            throw invalidParams('tail must be a positive integer');
+          return {
+            output:
+              typeof tail === 'number'
+                ? child.output.split('\n').slice(-tail).join('\n')
+                : child.output,
+          };
+        }
+        throw RequestError.methodNotFound(method);
+      },
+
       async unstable_forkSession(
         params: ForkSessionRequest
       ): Promise<NewSessionResponseWithModels> {
@@ -2054,6 +2890,7 @@ export function apply(ctx: HarnessContext, rawConfig?: DeepSeekAcpAdapterConfig)
           cwd: params.cwd,
           mcpServers: params.mcpServers ?? [],
           additionalDirectories: params.additionalDirectories,
+          _meta: params._meta,
         };
         validateSessionParams(creation);
         const query = ctx.get('sessionQuery') as
@@ -2097,6 +2934,16 @@ export function apply(ctx: HarnessContext, rawConfig?: DeepSeekAcpAdapterConfig)
         if (ctx.agents.get(record.agent.id) !== record.agent) {
           throw internalError('prompt was not queued: the agent was disposed outside the bridge');
         }
+        const goalControl = (params._meta?.lody as LodySessionMeta | undefined)?.goalControl;
+        if (
+          goalControl &&
+          (!goals ||
+            goalControl.version !== 1 ||
+            !['set', 'resume'].includes(goalControl.action) ||
+            (goalControl.action === 'set' &&
+              (typeof goalControl.objective !== 'string' || !goalControl.objective.trim())))
+        )
+          throw invalidParams('invalid goalControl');
         const messageId = randomUUID();
         let resolvePrompt!: (reason: StopReason) => void;
         let rejectPrompt!: (error: Error) => void;
@@ -2120,27 +2967,40 @@ export function apply(ctx: HarnessContext, rawConfig?: DeepSeekAcpAdapterConfig)
         };
         record.inflight = inflight;
         let admissionError: unknown;
+        let goalApplied = false;
         try {
-          const content = await admitAcpPrompt(
-            params.prompt,
-            llm,
-            record.selection.current,
-            attachments,
-            imagePromptEnabled,
-            admissionController.signal
-          );
+          const content = goalControl
+            ? []
+            : await admitAcpPrompt(
+                params.prompt,
+                llm,
+                record.selection.current,
+                attachments,
+                imagePromptEnabled,
+                admissionController.signal
+              );
           if (!inflight.cancelRequested) {
             if (ctx.agents.get(record.agent.id) !== record.agent) {
               throw internalError(
                 'prompt was not queued: the agent was disposed outside the bridge'
               );
             }
+            if (goalControl) {
+              if (goalControl.action === 'set')
+                goals!.create(record.agent, { objective: goalControl.objective });
+              else {
+                const goal = goals!.get(record.agent);
+                if (!goal) throw invalidParams('no goal to resume');
+                goals!.resume(record.agent, goal);
+              }
+            }
+            goalApplied = !!goalControl;
             const message = createUserMessage(messageId, content);
             inflight.messageId = messageId;
             inflight.messageQueued = true;
             const wasStarted = record.started;
             try {
-              record.agent.followup(message);
+              if (!goalControl) record.agent.followup(message);
               record.started = true;
             } catch (error: unknown) {
               inflight.messageQueued = false;
@@ -2161,6 +3021,7 @@ export function apply(ctx: HarnessContext, rawConfig?: DeepSeekAcpAdapterConfig)
           return { stopReason: await completion };
         }
         if (admissionError) {
+          if (goalApplied) pauseGoal(record);
           if (record.inflight === inflight) record.inflight = undefined;
           if (admissionError instanceof RequestError) throw admissionError;
           throw internalError(errorChain(admissionError));
@@ -2172,6 +3033,7 @@ export function apply(ctx: HarnessContext, rawConfig?: DeepSeekAcpAdapterConfig)
       cancel(params: CancelNotification): Promise<void> {
         const record = sessions.get(params.sessionId);
         if (!record) return Promise.resolve();
+        pauseGoal(record);
         record.questions.cancel();
         const inflight = record.inflight;
         if (inflight) {
@@ -2185,6 +3047,7 @@ export function apply(ctx: HarnessContext, rawConfig?: DeepSeekAcpAdapterConfig)
 
       async closeSession(params: CloseSessionRequest): Promise<void> {
         const record = requireSession(params.sessionId);
+        pauseGoal(record);
         record.questions.cancel();
         sessions.delete(params.sessionId);
         const inflight = record.inflight;
@@ -2214,6 +3077,7 @@ export function apply(ctx: HarnessContext, rawConfig?: DeepSeekAcpAdapterConfig)
     const records = [...sessions.values()];
     sessions.clear();
     for (const record of records) {
+      pauseGoal(record);
       record.questions.cancel();
       const inflight = record.inflight;
       if (inflight) {
