@@ -1,3 +1,4 @@
+import { runInNewContext } from 'node:vm';
 import { describe, expect, it } from 'vitest';
 
 import {
@@ -9,9 +10,62 @@ import {
   DEEPSEEK_HARNESS_PROFILE_NAME,
   DEEPSEEK_HARNESS_VERSION,
   createDeepSeekHarnessNpxSpecifiers,
+  createDeepSeekHarnessProfileFiles,
   toAdapterModuleSpecifier,
 } from './profile.js';
 describe('DeepSeek Harness profile', () => {
+  it.each([
+    ['https://api.deepseek.com', undefined, 'https://api.deepseek.com/anthropic'],
+    ['https://api.deepseek.com/v1/', undefined, 'https://api.deepseek.com/anthropic'],
+    ['https://api.deepseek.com/anthropic/v1', undefined, 'https://api.deepseek.com/anthropic'],
+    [
+      'https://api.deepseek.com',
+      { baseURL: 'https://gateway.example/v1' },
+      'https://gateway.example/v1',
+    ],
+    [
+      'https://gateway.example/v1',
+      { baseURL: 'https://api.deepseek.com/v1' },
+      'https://api.deepseek.com/anthropic',
+    ],
+    ['https://gateway.example/v1', undefined, undefined],
+    ['https://api.deepseek.com.evil.example', undefined, undefined],
+    ['https://api.deepseek.com:8443', undefined, undefined],
+    ['https://api.deepseek.com?token=synthetic', undefined, undefined],
+    ['https://synthetic@api.deepseek.com', undefined, undefined],
+    [undefined, undefined, undefined],
+  ])(
+    'resolves native provider config from env %s and settings %j',
+    (endpoint, section, expected) => {
+      const files = createDeepSeekHarnessProfileFiles({
+        adapterPath: '/synthetic/adapter.js',
+        presetRoot: '/synthetic/presets',
+      });
+      // Execute the generated Cordis expression, including its missing-file path.
+      const row = files.cordisPatchYml.split('- id: llm-deepseek\n')[1]!.split('\n')[0]!;
+      const expression = JSON.parse(row.slice(row.indexOf('!!js ') + 5));
+      const config = runInNewContext(expression, {
+        baseUrl: 'file:///synthetic/profile/',
+        process: {
+          env: { DEEPSEEK_BASE_URL: endpoint },
+          getBuiltinModule: (name: string) => {
+            if (name === 'node:fs')
+              return {
+                readFileSync: () => {
+                  if (!section) throw Object.assign(new Error('missing'), { code: 'ENOENT' });
+                  return 'synthetic YAML';
+                },
+              };
+            if (name === 'node:path') return { join: (...parts: string[]) => parts.join('/') };
+            if (name === 'node:os') return { homedir: () => '/synthetic' };
+            return { createRequire: () => () => ({ load: () => ({ 'llm-deepseek': section }) }) };
+          },
+        },
+      });
+      expect(config.baseURL).toBe(expected);
+    }
+  );
+
   it('pins the launcher, base bundle, and same-release package closure', () => {
     expect(DEEPSEEK_HARNESS_VERSION).toBe('0.2.0-rc.2');
     expect(DEEPSEEK_HARNESS_PROFILE_NAME).toBe('lody-acp');

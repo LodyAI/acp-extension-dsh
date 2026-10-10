@@ -14,13 +14,15 @@ import { pathToFileURL } from 'node:url';
 import {
   DEEPSEEK_HARNESS_DEFAULT_PERMISSION_PRESET,
   DEEPSEEK_HARNESS_PERMISSION_PRESETS,
+  DEEPSEEK_HARNESS_OFFICIAL_BASE_URL,
+  DEEPSEEK_HARNESS_OFFICIAL_BASE_URL_PATTERN,
 } from './capabilities.js';
 
 export const ACP_EXTENSION_DSH_VERSION = '0.2.0';
 export const DEEPSEEK_HARNESS_VERSION = '0.2.0-rc.2';
 export const DEEPSEEK_HARNESS_PI_AI_VERSION = '0.87.1';
 export const DEEPSEEK_HARNESS_SCHEMASTERY_VERSION = '3.18.4';
-export const ACP_EXTENSION_DSH_PROFILE_REVISION = 'v18';
+export const ACP_EXTENSION_DSH_PROFILE_REVISION = 'v19';
 export const ACP_EXTENSION_DSH_SESSION_ROOT_ENV = 'ACP_EXTENSION_DSH_SESSION_ROOT';
 export const ACP_EXTENSION_DSH_QUERY_PATH_ENV = 'ACP_EXTENSION_DSH_QUERY_PATH';
 export const DEEPSEEK_HARNESS_DEFAULT_SESSION_COMPRESSION = 'zstd';
@@ -402,11 +404,20 @@ function legacySettingsExpression(namespace: string): string {
     const file = path.join(home, 'settings.yaml');
     let text;
     try { text = fs.readFileSync(file, 'utf8'); }
-    catch (error) { if (error.code === 'ENOENT') return {}; throw error; }
+    catch (error) { if (error.code !== 'ENOENT') throw error; text = ''; }
     const document = process.getBuiltinModule('node:module').createRequire(baseUrl)('js-yaml').load(text) ?? {};
     if (typeof document !== 'object' || Array.isArray(document)) throw new Error('settings.yaml must be a mapping');
     const section = document[${JSON.stringify(namespace)}] ?? {};
     if (typeof section !== 'object' || Array.isArray(section)) throw new Error('settings.yaml section must be a mapping');
+    ${
+      namespace === 'llm-deepseek'
+        ? `
+    const endpoint = section.baseURL ?? process.env.DEEPSEEK_BASE_URL;
+    if (typeof endpoint === 'string' && new RegExp(${JSON.stringify(DEEPSEEK_HARNESS_OFFICIAL_BASE_URL_PATTERN.source)}, 'i').test(endpoint.trim())) {
+      return { ...section, baseURL: ${JSON.stringify(DEEPSEEK_HARNESS_OFFICIAL_BASE_URL)} };
+    }`
+        : ''
+    }
     return section;
   })()`);
 }

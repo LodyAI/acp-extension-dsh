@@ -82,6 +82,7 @@ import {
   DEEPSEEK_HARNESS_AGENT_PRESETS,
   DEEPSEEK_HARNESS_API_KEY_ENV,
   DEEPSEEK_HARNESS_BASE_URL_ENV,
+  isDeepSeekOfficialBaseUrl,
 } from './capabilities.js';
 import {
   ACP_EXTENSION_DSH_VERSION,
@@ -578,7 +579,7 @@ function selectedModel(record: SessionRecord): HarnessResolvedModel | undefined 
 }
 
 function modelDiscoveryUrl(baseUrl: string): URL {
-  const url = new URL(baseUrl);
+  const url = new URL(isDeepSeekOfficialBaseUrl(baseUrl) ? 'https://api.deepseek.com' : baseUrl);
   url.pathname = `${url.pathname.replace(/\/+$/u, '')}/models`;
   url.hash = '';
   return url;
@@ -2471,9 +2472,7 @@ export function apply(
         warn: (message) => ctx.logger.warn(`acp-extension-dsh: ${message}`),
       }),
       questions,
-      usage: new HarnessUsageTracker(
-        !baseUrl || /^https:\/\/api\.deepseek\.com(?:\/v1)?\/?$/.test(baseUrl)
-      ),
+      usage: new HarnessUsageTracker(!baseUrl || isDeepSeekOfficialBaseUrl(baseUrl)),
       agent: handle.agent,
       dispose,
       selection,

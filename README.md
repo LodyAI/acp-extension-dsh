@@ -44,6 +44,16 @@ endpoint cannot provide a usable list. Without an endpoint, the Harness catalog
 remains advisory: an explicitly configured or selected model is still resolved
 even when it is not listed.
 
+The official Messages base URL is `https://api.deepseek.com/anthropic`.
+Legacy official roots (`https://api.deepseek.com` and `/v1`) and versioned
+Messages roots normalize to it before native provider construction. Settings
+`llm-deepseek.baseURL` still takes precedence over the environment; neither the
+settings file nor the host environment is rewritten. Official model discovery
+uses `https://api.deepseek.com/models`, independently of the Messages path, and
+all official aliases retain official usage pricing. Custom endpoints keep their
+path and must support Messages for inference plus OpenAI-compatible `/models`
+for discovery. OpenAI Chat-only routes belong under `llm-pi-ai` instead.
+
 Harness is pinned to **0.2.0-rc.2** (npm `latest` at upgrade time). The ACP profile
 reads `llm-deepseek`, `llm-pi-ai`, and `agent-presets.default` from
 `$DSH_HOME/settings.yaml`, falling back to `~/.dsh/settings.yaml`. Model sections
