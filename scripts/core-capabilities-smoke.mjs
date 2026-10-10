@@ -7,6 +7,7 @@ import { pathToFileURL } from 'node:url';
 import test from 'node:test';
 import { ClientSideConnection, PROTOCOL_VERSION } from '@agentclientprotocol/sdk';
 import { apply } from '../dist/adapter.js';
+import { ToolCallBridge } from '../dist/tool-calls.js';
 
 const runtime = process.env.DSH_TEST_RUNTIME_ROOT;
 assert.ok(runtime);
@@ -19,6 +20,39 @@ const signal = () => {
   });
   return { promise, resolve };
 };
+
+await test('projects tool results built by the pinned native message constructor', async () => {
+  assert.equal(requireRuntime('@deepseek-ai/dsh-llm/package.json').version, '0.2.0-rc.2');
+  const { createToolResultMessage } = await load('dsh-llm');
+  const updates = [];
+  const bridge = new ToolCallBridge({
+    cwd: '/synthetic',
+    lookup: () => undefined,
+    content: async (block) => block,
+    emit: async (update) => {
+      updates.push(update);
+    },
+    warn: () => {},
+  });
+  for (const [id, content, isError] of [
+    ['success', [{ type: 'text', text: 'done' }], false],
+    ['failure', [{ type: 'text', text: 'denied' }], true],
+    ['empty', [], false],
+  ]) {
+    await bridge.event('tool/call', { callId: id, name: 'read', arguments: '{}' });
+    const message = createToolResultMessage({ callId: id, content, isError });
+    await bridge.event('tool/result', { message });
+    assert.deepEqual(updates.at(-1), {
+      sessionUpdate: 'tool_call_update',
+      toolCallId: id,
+      status: isError ? 'failed' : 'completed',
+      content: content.map((block) => ({ type: 'content', content: block })),
+      rawOutput: { message },
+    });
+  }
+  await bridge.event('turn/end', {});
+  assert.equal(updates.length, 6, 'recorded results must not be interrupted as unknown');
+});
 
 await test(
   'Core controls retain native prompt ownership and read-only history',
