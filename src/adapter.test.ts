@@ -433,13 +433,9 @@ describe('DeepSeek Harness ACP adapter', () => {
         seq: 0,
         data: {
           message: {
-            content: [
-              {
-                type: 'tool-result',
-                toolCallId: 'call-1',
-                content: [{ type: 'text', text: 'result' }],
-              },
-            ],
+            role: 'tool',
+            toolCallId: 'call-1',
+            content: [{ type: 'text', text: 'result' }],
           },
         },
       }
@@ -475,6 +471,16 @@ describe('DeepSeek Harness ACP adapter', () => {
     expect(h.updates).toContainEqual(
       expect.objectContaining({
         update: expect.objectContaining({ sessionUpdate: 'tool_call', toolCallId: 'call-1' }),
+      })
+    );
+    expect(h.updates).toContainEqual(
+      expect.objectContaining({
+        update: expect.objectContaining({
+          sessionUpdate: 'tool_call_update',
+          toolCallId: 'call-1',
+          status: 'completed',
+          content: [{ type: 'content', content: { type: 'text', text: 'result' } }],
+        }),
       })
     );
     await expect(
@@ -1796,6 +1802,7 @@ describe('DeepSeek Harness ACP adapter', () => {
       sessionEvent,
       streamEvent,
       currentAgent: () => createdAgent!,
+      claim: globalListeners.get('agent/inbox/claimed')!,
       approval: globalListeners.get('approval/request')!,
       spawnChild: (id: string, nativeId: string, parent = createdAgent!) => {
         const agent = {
@@ -1938,6 +1945,66 @@ describe('DeepSeek Harness ACP adapter', () => {
     expect(new Set(replacements.map((task) => task.taskId)).size).toBe(replacements.length);
   });
 
+  it.each([
+    { isError: false, content: [{ type: 'text', text: 'done' }], status: 'completed' },
+    { isError: true, content: [{ type: 'text', text: 'denied' }], status: 'failed' },
+    { isError: false, content: [], status: 'completed' },
+  ])(
+    'settles a prompt with a $status native tool result ($content)',
+    async ({ isError, content, status }) => {
+      const updates: Array<{ update: Record<string, unknown> }> = [];
+      const h = await streamingHarness((notification) => updates.push(notification));
+      h.agent.followup = (message) => {
+        h.claim({ agent: h.agent, message, turn: 1 });
+        h.sessionEvent(h.agent.session, {
+          type: 'tool/call',
+          data: { callId: 'result-1', name: 'read', arguments: '{}' },
+        });
+        h.sessionEvent(h.agent.session, {
+          type: 'tool/result',
+          data: { message: { role: 'tool', toolCallId: 'result-1', content, isError } },
+        });
+        h.sessionEvent(h.agent.session, {
+          type: 'turn/end',
+          data: { turn: 1, reason: { kind: 'completed' } },
+        });
+      };
+      await expect(
+        h.client.prompt({
+          sessionId: h.session.sessionId,
+          prompt: [{ type: 'text', text: 'read' }],
+        })
+      ).resolves.toEqual({ stopReason: 'end_turn' });
+      expect(updates.filter(({ update }) => update.sessionUpdate === 'tool_call_update')).toEqual([
+        expect.objectContaining({
+          update: expect.objectContaining({
+            toolCallId: 'result-1',
+            status,
+            content: content.map((block) => ({ type: 'content', content: block })),
+            rawOutput: { message: { role: 'tool', toolCallId: 'result-1', content, isError } },
+          }),
+        }),
+      ]);
+    }
+  );
+
+  it('rejects a malformed tool result instead of hiding output failure', async () => {
+    const h = await streamingHarness(() => {});
+    h.agent.followup = (message) => {
+      h.claim({ agent: h.agent, message, turn: 1 });
+      h.sessionEvent(h.agent.session, {
+        type: 'tool/result',
+        data: { message: { role: 'tool', content: [{ type: 'text', text: 'missing call id' }] } },
+      });
+    };
+    await expect(
+      h.client.prompt({
+        sessionId: h.session.sessionId,
+        prompt: [{ type: 'text', text: 'read' }],
+      })
+    ).rejects.toThrow('assistant output delivery failed');
+  });
+
   it('delivers tool details, nested calls, approval and terminal failures through ACP', async () => {
     const updates: Array<{ sessionId: string; update: Record<string, unknown> }> = [];
     let finished!: () => void;
@@ -1991,7 +2058,7 @@ describe('DeepSeek Harness ACP adapter', () => {
       event('tool/result', {
         turn: 1,
         step: 1,
-        message: { content: [{ type: 'tool-result', toolCallId: id, isError, content }] },
+        message: { role: 'tool', toolCallId: id, isError, content },
         ...(meta === undefined ? {} : { meta }),
       });
     event('tool/call', { callId: 'shell', name: 'bash', arguments: '{"command":"echo hello"}' });
@@ -2084,7 +2151,7 @@ describe('DeepSeek Harness ACP adapter', () => {
     ]);
     expect(ends[0]).toMatchObject({
       content: [{ type: 'content', content: { type: 'text', text: 'hello' } }],
-      rawOutput: { message: { content: [{ toolCallId: 'shell' }] } },
+      rawOutput: { message: { role: 'tool', toolCallId: 'shell', isError: false } },
     });
     expect(starts[1]).toMatchObject({ locations: [{ path: `${process.cwd()}/a.ts`, line: 1 }] });
     expect(starts[1]).not.toHaveProperty('content');
@@ -2165,7 +2232,7 @@ describe('DeepSeek Harness ACP adapter', () => {
     ];
     fixture.sessionEvent(fixture.agent.session, {
       type: 'tool/result',
-      data: { message: { content: [{ type: 'tool-result', toolCallId: 'same-id', content }] } },
+      data: { message: { role: 'tool', toolCallId: 'same-id', content } },
     });
     fixture.sessionEvent(fixture.agent.session, {
       type: 'assistant/message',

@@ -26,7 +26,9 @@ Harness `compaction/start` and `compaction/end` events into a standard ACP tool
 lifecycle carrying `_meta.lody.activity`. Manual and automatic compaction remain
 distinguishable, and failed compactions keep the Harness error reason.
 Committed assistant images are read back through the attachment store and sent as
-ACP image blocks. Prompt completion and cancellation wait for admission, Harness
+ACP image blocks. Tool results use Harness 0.2's tool-role messages: call identity
+and error state live on the message, alongside the result content. Native V4
+migration normalizes older persisted wrappers before replay. Prompt completion and cancellation wait for admission, Harness
 idle, and ordered output delivery before releasing the session's prompt slot.
 
 ACP model choices are discovered from Harness when each session is created and

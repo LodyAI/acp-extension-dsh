@@ -8,12 +8,14 @@ import { resolve } from 'node:path';
 import { z } from 'zod';
 
 const blockSchema = z.object({ type: z.string() }).passthrough();
-const resultSchema = z.object({
-  type: z.literal('tool-result'),
-  toolCallId: z.string().min(1),
-  content: z.array(blockSchema),
-  isError: z.boolean().optional(),
-});
+const resultSchema = z
+  .object({
+    role: z.literal('tool'),
+    toolCallId: z.string().min(1),
+    content: z.array(blockSchema),
+    isError: z.boolean().optional(),
+  })
+  .passthrough();
 const callSchema = z.object({
   callId: z.string().min(1),
   name: z.string().min(1),
@@ -210,18 +212,17 @@ export class ToolCallBridge {
     } else if (type === 'tool/result') {
       const event = z
         .object({
-          message: z.object({ content: z.array(resultSchema) }),
+          message: resultSchema,
           meta: z.unknown().optional(),
         })
         .passthrough()
         .parse(data);
-      for (const block of event.message.content) {
-        await this.finish(
-          block.toolCallId,
-          { content: block.content, isError: block.isError === true, meta: event.meta },
-          event
-        );
-      }
+      const message = event.message;
+      await this.finish(
+        message.toolCallId,
+        { content: message.content, isError: message.isError === true, meta: event.meta },
+        event
+      );
     } else if (type === 'tool/ptc-dispatch-start' || type === 'tool/ptc-dispatch') {
       const call = ptcSchema.parse(data);
       await this.start(call.subCallId, call.name, call.arguments);
