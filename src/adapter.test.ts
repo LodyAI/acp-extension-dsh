@@ -155,7 +155,18 @@ describe('DeepSeek Harness ACP adapter', () => {
     vi.unstubAllGlobals();
   });
 
-  const endpoints = ['https://provider.example/v1/', 'https://api.deepseek.com/v1/'];
+  const endpoints = [
+    ['https://provider.example/v1/', 'https://provider.example/v1/models', false],
+    ['https://api.deepseek.com', 'https://api.deepseek.com/models', true],
+    ['https://api.deepseek.com/v1/', 'https://api.deepseek.com/models', true],
+    ['https://api.deepseek.com/anthropic', 'https://api.deepseek.com/models', true],
+    ['https://api.deepseek.com/anthropic/v1/', 'https://api.deepseek.com/models', true],
+    [
+      'https://api.deepseek.com.evil.example/anthropic/',
+      'https://api.deepseek.com.evil.example/anthropic/models',
+      false,
+    ],
+  ] as const;
 
   async function forkHarness() {
     type Context = Parameters<typeof apply>[0];
@@ -744,7 +755,7 @@ describe('DeepSeek Harness ACP adapter', () => {
     ).rejects.toThrow('disk unavailable');
   });
 
-  it.each(endpoints)('applies settings and usage at %s', async (baseUrl) => {
+  it.each(endpoints)('applies settings and usage at %s', async (baseUrl, modelsUrl, official) => {
     vi.stubEnv('DEEPSEEK_BASE_URL', baseUrl);
     vi.stubEnv('DEEPSEEK_API_KEY', 'sk-test');
     const fetchModels = vi.fn(
@@ -1016,7 +1027,7 @@ describe('DeepSeek Harness ACP adapter', () => {
       },
       delta: { usage: { inputTokens: 100 } },
     });
-    if (baseUrl === 'https://api.deepseek.com/v1/') {
+    if (official) {
       expect(reportedUsage).toMatchObject({
         modelUsage: {
           'deepseek-flash': {
@@ -1055,7 +1066,7 @@ describe('DeepSeek Harness ACP adapter', () => {
     });
     expect(fetchModels).toHaveBeenCalledOnce();
     expect(fetchModels).toHaveBeenCalledWith(
-      new URL('models', baseUrl),
+      new URL(modelsUrl),
       expect.objectContaining({
         method: 'GET',
         redirect: 'error',

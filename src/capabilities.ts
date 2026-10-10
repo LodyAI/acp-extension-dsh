@@ -41,6 +41,15 @@ export const DEEPSEEK_HARNESS_PERMISSION_MODES = DEEPSEEK_HARNESS_PERMISSION_PRE
 export const DEEPSEEK_HARNESS_API_KEY_ENV = 'DEEPSEEK_API_KEY';
 export const DEEPSEEK_HARNESS_BASE_URL_ENV = 'DEEPSEEK_BASE_URL';
 
+/** Official Chat-era aliases are upgraded only on this exact HTTPS authority. */
+export const DEEPSEEK_HARNESS_OFFICIAL_BASE_URL = 'https://api.deepseek.com/anthropic';
+export const DEEPSEEK_HARNESS_OFFICIAL_BASE_URL_PATTERN =
+  /^https:\/\/api\.deepseek\.com(?::443)?(?:\/(?:v1|anthropic(?:\/v1)?))?\/*$/i;
+
+export function isDeepSeekOfficialBaseUrl(value: string | undefined): boolean {
+  return DEEPSEEK_HARNESS_OFFICIAL_BASE_URL_PATTERN.test(value?.trim() ?? '');
+}
+
 /** Built-in agent compositions shipped by the official DeepSeek Harness CLI. */
 export const DEEPSEEK_HARNESS_AGENT_PRESETS = [
   {

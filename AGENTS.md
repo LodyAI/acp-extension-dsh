@@ -14,7 +14,8 @@ Provider-owned ACP/Harness boundary. Keep it usable without importing Lody packa
   advisory: resolve and expose the configured model even when it is unlisted, and
   never reject a model switch only because it is absent from the catalog. Do not
   pin a default catalog in the generated profile. When `DEEPSEEK_BASE_URL` is set,
-  discover its OpenAI-compatible `GET /models` response once per ACP connection,
+  discover its OpenAI-compatible `GET /models` response once per ACP connection
+  (official Chat/Messages roots use `https://api.deepseek.com/models`),
   resolve those exact ids through Harness, and use the first as the initial model;
   do not add a parallel host-authored model list. Permission knob events can move
   a session to the derived `custom` state outside ACP, so keep both ACP mode and
@@ -36,6 +37,9 @@ Provider-owned ACP/Harness boundary. Keep it usable without importing Lody packa
   retain legacy `$DSH_HOME/.agent-presets` identities and configured defaults.
   Disable Harness 0.2's automatic settings migration in this generated profile.
   Read legacy model sections into native Config without modifying settings.yaml;
+  normalize exact official Chat/Messages aliases to the `/anthropic` inference root
+  before native provider construction, preserving settings-over-environment precedence.
+  Never rewrite custom endpoints or credentials.
   validate on ACP initialize and wait for Loader settlement before catalogs.
   Model changes require a fresh connection. Keep `dsh-llm-pi-ai` dormant without
   configured providers. Native Config owns route lifecycle and credentials.
