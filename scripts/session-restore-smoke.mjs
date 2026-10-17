@@ -17,7 +17,7 @@ const requireRuntime = createRequire(join(runtime, '.restore-test.cjs'));
 const load = (name) => import(pathToFileURL(requireRuntime.resolve(`@deepseek-ai/${name}`)).href);
 assert.equal(
   requireRuntime('@deepseek-ai/dsh-agent-loop/package.json').version,
-  process.env.DSH_TEST_EXPECTED_RUNTIME_VERSION ?? '0.2.0-rc.2'
+  process.env.DSH_TEST_EXPECTED_RUNTIME_VERSION ?? '0.2.1-rc.2'
 );
 
 if (process.argv[2] === '--phase') {
@@ -51,8 +51,9 @@ if (process.argv[2] === '--phase') {
       'dsh-agent',
     ])
       await ctx.plugin((await load(name)).default).await();
+    const persistence = await load('dsh-session-persistence-jsonl');
     await ctx
-      .plugin((await load('dsh-session-persistence-jsonl')).default, {
+      .plugin(persistence.default ?? persistence, {
         root: join(root, 'sessions'),
         compression,
       })
@@ -191,7 +192,7 @@ if (process.argv[2] === '--phase') {
                   PATH: process.env.PATH,
                   DSH_TEST_RUNTIME_ROOT: previous && phase === 'new' ? previous : runtime,
                   DSH_TEST_EXPECTED_RUNTIME_VERSION:
-                    previous && phase === 'new' ? '0.1.5-rc.2' : '0.2.0-rc.2',
+                    previous && phase === 'new' ? '0.1.5-rc.2' : '0.2.1-rc.2',
                 },
                 timeout: 60_000,
               }

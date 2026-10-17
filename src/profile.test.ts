@@ -67,7 +67,7 @@ describe('DeepSeek Harness profile', () => {
   );
 
   it('pins the launcher, base bundle, and same-release package closure', () => {
-    expect(DEEPSEEK_HARNESS_VERSION).toBe('0.2.0-rc.2');
+    expect(DEEPSEEK_HARNESS_VERSION).toBe('0.2.1-rc.2');
     expect(DEEPSEEK_HARNESS_PROFILE_NAME).toBe('lody-acp');
     expect(DEEPSEEK_HARNESS_PROFILE_BUNDLES).toEqual(['@deepseek-ai/dsh-base']);
     expect(new Set(DEEPSEEK_HARNESS_NPX_PACKAGES).size).toBe(DEEPSEEK_HARNESS_NPX_PACKAGES.length);
@@ -82,8 +82,18 @@ describe('DeepSeek Harness profile', () => {
         '@deepseek-ai/dsh-attachment-local',
         '@deepseek-ai/dsh-tool-str-replace-editor',
         '@deepseek-ai/dsh-session',
+        '@deepseek-ai/dsh-working-directory',
+        '@deepseek-ai/dsh-tool-schedule',
+        '@deepseek-ai/dsh-plugin-market',
       ])
     );
+    for (const removed of [
+      '@deepseek-ai/dsh-invariants',
+      '@deepseek-ai/dsh-subagent-in-process-driver',
+      '@deepseek-ai/dsh-experimental-schedule-bundle',
+    ]) {
+      expect(DEEPSEEK_HARNESS_NPX_PACKAGES).not.toContain(removed);
+    }
     expect(DEEPSEEK_HARNESS_NPX_PACKAGES).not.toContain('@deepseek-ai/dsh-acp-demo');
     expect(DEEPSEEK_HARNESS_NPX_PACKAGES).not.toContain('@deepseek-ai/dsh-agent-spine-demo');
   });
@@ -94,11 +104,11 @@ describe('DeepSeek Harness profile', () => {
     expect(specifiers).toHaveLength(DEEPSEEK_HARNESS_NPX_PACKAGES.length + 2);
     expect(specifiers).toEqual(
       expect.arrayContaining([
-        '@deepseek-ai/cordis@4.0.4',
-        '@deepseek-ai/cordis-plugin-group@1.0.4',
-        '@deepseek-ai/cordis-plugin-include@1.0.9',
-        '@deepseek-ai/cordis-plugin-loader@1.0.5',
-        '@deepseek-ai/cordis-plugin-timer@1.1.6',
+        '@deepseek-ai/cordis@4.0.5',
+        '@deepseek-ai/cordis-plugin-group@1.0.5',
+        '@deepseek-ai/cordis-plugin-include@1.0.10',
+        '@deepseek-ai/cordis-plugin-loader@1.0.6',
+        '@deepseek-ai/cordis-plugin-timer@1.1.7',
       ])
     );
     // No Cordis package publishes a `DEEPSEEK_HARNESS_VERSION` release, so a
