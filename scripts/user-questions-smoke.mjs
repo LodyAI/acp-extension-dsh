@@ -17,7 +17,7 @@ const { createScope } = await load('@deepseek-ai/dsh-scope');
 const { default: SessionStore, SessionId } = await load('@deepseek-ai/dsh-session');
 const { UserQuestionService } = await load('@deepseek-ai/dsh-user-questions');
 const askTool = await load('@deepseek-ai/dsh-tool-ask-user');
-assert.equal(requireRuntime('@deepseek-ai/dsh-user-questions/package.json').version, '0.2.0-rc.2');
+assert.equal(requireRuntime('@deepseek-ai/dsh-user-questions/package.json').version, '0.2.1-rc.2');
 
 await test('native Harness tool → scoped waterfall → ACP → native answers and ownership failures', async () => {
   const ctx = new Context();

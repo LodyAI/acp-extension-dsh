@@ -56,7 +56,9 @@ all official aliases retain official usage pricing. Custom endpoints keep their
 path and must support Messages for inference plus OpenAI-compatible `/models`
 for discovery. OpenAI Chat-only routes belong under `llm-pi-ai` instead.
 
-Harness is pinned to **0.2.0-rc.2** (npm `latest` at upgrade time). The ACP profile
+Harness is pinned to **0.2.1-rc.2** (npm `next` at upgrade time; `latest` still
+points to the older 0.0.1-rc.1). Native model discovery hides routes without
+credentials; the configured model remains selectable even when unlisted. The ACP profile
 reads `llm-deepseek`, `llm-pi-ai`, and `agent-presets.default` from
 `$DSH_HOME/settings.yaml`, falling back to `~/.dsh/settings.yaml`. Model sections
 feed native provider Config schemas. Missing settings preserve defaults; malformed
@@ -354,7 +356,7 @@ are not part of these tests.
 
 ## Core controls
 
-The generated Harness 0.2.0-rc.2 profile (v18) exposes Core sessionHistory,
+The generated Harness 0.2.1-rc.2 profile (v20) exposes Core sessionHistory,
 steering, subagents, goal, tasks.background and worktreeProject in addition to
 forkAtTurn, subagentEvents, sessionTitle, compaction and cumulative usage.
 Goal, task and project declarations require their backing service/configuration.
@@ -387,8 +389,8 @@ Task/output requests require an active root session. Output is a bounded text ta
 (100,000 characters); `tail` limits returned lines. Each run advertises its actual
 stream/output/cancel support. Restored sessions begin a new observed-run roster.
 No account rate-limit windows are available from the API-key composition, and the
-experimental schedule bundle starts independent turns without an ACP ownership
-transport. `rateLimits` and `tasks.scheduled` therefore remain unadvertised.
+native schedule service is not mounted because this composition has no ACP
+transport for scheduled-turn ownership. `rateLimits` and `tasks.scheduled` therefore remain unadvertised.
 
 Native behavioral probe (synthetic model and isolated storage):
 

@@ -19,10 +19,10 @@ import {
 } from './capabilities.js';
 
 export const ACP_EXTENSION_DSH_VERSION = '0.2.0';
-export const DEEPSEEK_HARNESS_VERSION = '0.2.0-rc.2';
-export const DEEPSEEK_HARNESS_PI_AI_VERSION = '0.87.1';
-export const DEEPSEEK_HARNESS_SCHEMASTERY_VERSION = '3.18.4';
-export const ACP_EXTENSION_DSH_PROFILE_REVISION = 'v19';
+export const DEEPSEEK_HARNESS_VERSION = '0.2.1-rc.2';
+export const DEEPSEEK_HARNESS_PI_AI_VERSION = '1.3.0';
+export const DEEPSEEK_HARNESS_SCHEMASTERY_VERSION = '3.18.5';
+export const ACP_EXTENSION_DSH_PROFILE_REVISION = 'v20';
 export const ACP_EXTENSION_DSH_SESSION_ROOT_ENV = 'ACP_EXTENSION_DSH_SESSION_ROOT';
 export const ACP_EXTENSION_DSH_QUERY_PATH_ENV = 'ACP_EXTENSION_DSH_QUERY_PATH';
 export const DEEPSEEK_HARNESS_DEFAULT_SESSION_COMPRESSION = 'zstd';
@@ -41,8 +41,8 @@ export const ACP_EXTENSION_DSH_CAPABILITY_SOURCE_VERSION = `acp-extension-dsh@${
 
 /**
  * Exact same-version package closure for the launcher install. The Harness
- * packages publish caret ranges, so every package the composed profile or a
- * shipped Agent preset can resolve is named here with the same release; the
+ * packages and their peers are pinned together, so every package the composed
+ * profile or a shipped Agent preset can resolve uses the same release; the
  * first entry owns the `dsh` binary.
  */
 export const DEEPSEEK_HARNESS_NPX_PACKAGES = [
@@ -66,6 +66,7 @@ export const DEEPSEEK_HARNESS_NPX_PACKAGES = [
   '@deepseek-ai/dsh-api-account-controller',
   '@deepseek-ai/dsh-api-gateway',
   '@deepseek-ai/dsh-api-job-controller',
+  '@deepseek-ai/dsh-api-remote-access',
   '@deepseek-ai/dsh-api-remotes',
   '@deepseek-ai/dsh-api-session-controller',
   '@deepseek-ai/dsh-api-settings-controller',
@@ -99,6 +100,7 @@ export const DEEPSEEK_HARNESS_NPX_PACKAGES = [
   '@deepseek-ai/dsh-client-ui-commands',
   '@deepseek-ai/dsh-client-ui-conversation',
   '@deepseek-ai/dsh-client-ui-cordis',
+  '@deepseek-ai/dsh-client-ui-deepseek-model-label-1017',
   '@deepseek-ai/dsh-client-ui-deliverables',
   '@deepseek-ai/dsh-client-ui-directory-picker-browse',
   '@deepseek-ai/dsh-client-ui-directory-picker-native',
@@ -112,10 +114,12 @@ export const DEEPSEEK_HARNESS_NPX_PACKAGES = [
   '@deepseek-ai/dsh-client-ui-permission-presets',
   '@deepseek-ai/dsh-client-ui-plan',
   '@deepseek-ai/dsh-client-ui-plugin-manager',
+  '@deepseek-ai/dsh-client-ui-plugin-market',
   '@deepseek-ai/dsh-client-ui-primitives',
   '@deepseek-ai/dsh-client-ui-reference',
   '@deepseek-ai/dsh-client-ui-renderer',
   '@deepseek-ai/dsh-client-ui-schedule',
+  '@deepseek-ai/dsh-client-ui-secret-mask',
   '@deepseek-ai/dsh-client-ui-session',
   '@deepseek-ai/dsh-client-ui-settings',
   '@deepseek-ai/dsh-client-ui-settings-account',
@@ -166,13 +170,26 @@ export const DEEPSEEK_HARNESS_NPX_PACKAGES = [
   '@deepseek-ai/dsh-experimental-agent-team-profile',
   '@deepseek-ai/dsh-experimental-api-speech-to-text',
   '@deepseek-ai/dsh-experimental-auto-review',
+  '@deepseek-ai/dsh-experimental-badge-skill-bundle',
   '@deepseek-ai/dsh-experimental-client-ui-agent-team',
+  '@deepseek-ai/dsh-experimental-client-ui-cot-translation',
   '@deepseek-ai/dsh-experimental-client-ui-voice-input',
-  '@deepseek-ai/dsh-experimental-schedule-bundle',
+  '@deepseek-ai/dsh-experimental-cot-translation-bundle',
+  '@deepseek-ai/dsh-experimental-inspector',
+  '@deepseek-ai/dsh-experimental-inspector-profile',
+  '@deepseek-ai/dsh-experimental-plugin-market-bundle',
+  '@deepseek-ai/dsh-experimental-ralph-bundle',
+  '@deepseek-ai/dsh-experimental-session-inspector',
+  '@deepseek-ai/dsh-experimental-session-search',
+  '@deepseek-ai/dsh-experimental-session-titles-bundle',
   '@deepseek-ai/dsh-experimental-speech-to-text',
   '@deepseek-ai/dsh-experimental-speech-to-text-sensevoice',
+  '@deepseek-ai/dsh-experimental-terminal-bundle',
   '@deepseek-ai/dsh-experimental-tool-agent-team',
+  '@deepseek-ai/dsh-experimental-tool-worktree',
+  '@deepseek-ai/dsh-experimental-translator',
   '@deepseek-ai/dsh-experimental-voice-input-bundle',
+  '@deepseek-ai/dsh-experimental-worktree',
   '@deepseek-ai/dsh-file-reference',
   '@deepseek-ai/dsh-file-reference-local',
   '@deepseek-ai/dsh-fs',
@@ -181,6 +198,7 @@ export const DEEPSEEK_HARNESS_NPX_PACKAGES = [
   '@deepseek-ai/dsh-fs-sandbox',
   '@deepseek-ai/dsh-goal',
   '@deepseek-ai/dsh-goal-round-driver',
+  '@deepseek-ai/dsh-harness-dev-context',
   '@deepseek-ai/dsh-headless',
   '@deepseek-ai/dsh-hmr',
   '@deepseek-ai/dsh-home-paths',
@@ -197,7 +215,6 @@ export const DEEPSEEK_HARNESS_NPX_PACKAGES = [
   '@deepseek-ai/dsh-host-product-telemetry-otel',
   '@deepseek-ai/dsh-host-webserver',
   '@deepseek-ai/dsh-http-proxy',
-  '@deepseek-ai/dsh-invariants',
   '@deepseek-ai/dsh-jobs',
   '@deepseek-ai/dsh-jobs-local',
   '@deepseek-ai/dsh-launch-environment',
@@ -220,6 +237,8 @@ export const DEEPSEEK_HARNESS_NPX_PACKAGES = [
   '@deepseek-ai/dsh-persona',
   '@deepseek-ai/dsh-plan-mode',
   '@deepseek-ai/dsh-plugin-manager',
+  '@deepseek-ai/dsh-plugin-market',
+  '@deepseek-ai/dsh-plugin-market-index',
   '@deepseek-ai/dsh-plugin-package-inventory-deepseek',
   '@deepseek-ai/dsh-ptc-runtime',
   '@deepseek-ai/dsh-ptc-runtime-node',
@@ -257,6 +276,7 @@ export const DEEPSEEK_HARNESS_NPX_PACKAGES = [
   '@deepseek-ai/dsh-session-telemetry',
   '@deepseek-ai/dsh-session-telemetry-otel',
   '@deepseek-ai/dsh-session-title',
+  '@deepseek-ai/dsh-session-title-all-prompts-llm',
   '@deepseek-ai/dsh-session-title-first-prompt-llm',
   '@deepseek-ai/dsh-session-title-llm',
   '@deepseek-ai/dsh-session-turn-outline',
@@ -275,7 +295,6 @@ export const DEEPSEEK_HARNESS_NPX_PACKAGES = [
   '@deepseek-ai/dsh-storage-json',
   '@deepseek-ai/dsh-subagent',
   '@deepseek-ai/dsh-subagent-fork-in-process',
-  '@deepseek-ai/dsh-subagent-in-process-driver',
   '@deepseek-ai/dsh-subagent-spawn-in-process',
   '@deepseek-ai/dsh-subprocess',
   '@deepseek-ai/dsh-subprocess-local',
@@ -299,13 +318,17 @@ export const DEEPSEEK_HARNESS_NPX_PACKAGES = [
   '@deepseek-ai/dsh-tool-pwsh',
   '@deepseek-ai/dsh-tool-pwsh-persistent',
   '@deepseek-ai/dsh-tool-ralph',
+  '@deepseek-ai/dsh-tool-schedule',
+  '@deepseek-ai/dsh-tool-session-query',
   '@deepseek-ai/dsh-tool-skill',
   '@deepseek-ai/dsh-tool-str-replace-editor',
   '@deepseek-ai/dsh-tool-subagent',
   '@deepseek-ai/dsh-tool-subagent-control',
+  '@deepseek-ai/dsh-tool-terminal',
   '@deepseek-ai/dsh-tool-todo',
   '@deepseek-ai/dsh-tool-web',
   '@deepseek-ai/dsh-tool-workflow',
+  '@deepseek-ai/dsh-tool-working-directory',
   '@deepseek-ai/dsh-tool-workspace-dependencies',
   '@deepseek-ai/dsh-tools',
   '@deepseek-ai/dsh-typert-loader',
@@ -320,6 +343,7 @@ export const DEEPSEEK_HARNESS_NPX_PACKAGES = [
   '@deepseek-ai/dsh-util-workspace-path',
   '@deepseek-ai/dsh-web',
   '@deepseek-ai/dsh-web-app',
+  '@deepseek-ai/dsh-web-deepseek-api',
   '@deepseek-ai/dsh-web-fetch-http',
   '@deepseek-ai/dsh-web-frontend',
   '@deepseek-ai/dsh-web-search-deepseek',
@@ -328,18 +352,19 @@ export const DEEPSEEK_HARNESS_NPX_PACKAGES = [
   '@deepseek-ai/dsh-win32-process',
   '@deepseek-ai/dsh-workflow',
   '@deepseek-ai/dsh-workflow-ptc',
+  '@deepseek-ai/dsh-working-directory',
   '@deepseek-ai/dsh-workspace',
   '@deepseek-ai/dsh-workspace-changes',
 ] as const;
 
 /** Cordis and Cosmokit releases are independent of the Harness package family. */
 export const DEEPSEEK_HARNESS_CORDIS_PACKAGE_VERSIONS: Readonly<Record<string, string>> = {
-  '@deepseek-ai/cordis': '4.0.4',
-  '@deepseek-ai/cordis-plugin-group': '1.0.4',
-  '@deepseek-ai/cordis-plugin-include': '1.0.9',
-  '@deepseek-ai/cordis-plugin-loader': '1.0.5',
-  '@deepseek-ai/cordis-plugin-timer': '1.1.6',
-  '@deepseek-ai/cosmokit': '1.8.5',
+  '@deepseek-ai/cordis': '4.0.5',
+  '@deepseek-ai/cordis-plugin-group': '1.0.5',
+  '@deepseek-ai/cordis-plugin-include': '1.0.10',
+  '@deepseek-ai/cordis-plugin-loader': '1.0.6',
+  '@deepseek-ai/cordis-plugin-timer': '1.1.7',
+  '@deepseek-ai/cosmokit': '1.8.6',
 };
 
 /**

@@ -38,9 +38,10 @@ const cases = [
     settings:
       '# preserved comment\nllm-deepseek:\n  models:\n    - id: synthetic-settings-model\n      name: Synthetic settings model\n',
     expectedModel: 'synthetic-settings-model',
+    discoveryCredential: true,
   },
   {
-    name: 'pi-ai route is selectable and missing credential fails before provider I/O',
+    name: 'unlisted pi-ai route is selectable and missing credential fails before provider I/O',
     settings: `llm-pi-ai:
   providers:
     synthetic-route:
@@ -127,6 +128,8 @@ for (const fixture of cases) {
         USERPROFILE: root,
         ...(process.env.SystemRoot ? { SystemRoot: process.env.SystemRoot } : {}),
         DSH_HOME: root,
+        // Native discovery now requires credentials; this synthetic key is never sent.
+        ...(fixture.discoveryCredential ? { DEEPSEEK_API_KEY: 'synthetic-settings-test-key' } : {}),
         ACP_EXTENSION_DSH_SESSION_ROOT: join(root, 'sessions'),
         ACP_EXTENSION_DSH_QUERY_PATH: join(root, 'sessions/query.db'),
       },
@@ -183,13 +186,21 @@ for (const fixture of cases) {
           );
         }
         const model = session.configOptions.find((option) => option.id === 'model');
-        const target = model.options.find((option) => {
+        let target = model.options.find((option) => {
           const [provider, modelId] = decodeModelRoute(option.value) ?? [];
           return (
             modelId === fixture.expectedModel &&
             (fixture.expectedProvider === undefined || provider === fixture.expectedProvider)
           );
         });
+        if (fixture.missingCredential) {
+          assert.equal(target, undefined, 'native catalog hides routes without credentials');
+          target = {
+            value: `dsh-route:${Buffer.from(
+              JSON.stringify([fixture.expectedProvider, fixture.expectedModel])
+            ).toString('base64url')}`,
+          };
+        }
         assert.ok(target, JSON.stringify(model.options));
         if (fixture.settings?.startsWith('# preserved comment')) {
           assert.ok(
