@@ -86,6 +86,7 @@ import {
 } from './capabilities.js';
 import {
   ACP_EXTENSION_DSH_VERSION,
+  ACP_EXTENSION_DSH_LEGACY_HOME_ENV,
   DEEPSEEK_HARNESS_DEFAULT_MODEL,
   DEEPSEEK_HARNESS_PROVIDER,
 } from './profile.js';
@@ -1117,12 +1118,40 @@ async function assistantBlockToAcp(
 
 async function replayBlockToAcp(
   block: HarnessMessageBlock,
-  attachments: HarnessAttachmentStore | undefined
+  attachments: HarnessAttachmentStore | undefined,
+  readLegacy?: HarnessAttachmentStore['readImage']
 ): Promise<ContentBlock | undefined> {
   try {
     return await assistantBlockToAcp(block, attachments);
   } catch (error) {
     const cause = error instanceof Error ? error.cause : undefined;
+    if (
+      block.type === 'image' &&
+      'attachment' in block &&
+      readLegacy &&
+      cause &&
+      typeof cause === 'object' &&
+      'code' in cause &&
+      cause.code === 'ATTACHMENT_NOT_FOUND'
+    ) {
+      try {
+        const stored = await readLegacy(block.attachment);
+        return {
+          type: 'image',
+          data: Buffer.from(stored.data).toString('base64'),
+          mimeType: stored.ref.mediaType,
+        };
+      } catch (legacyError) {
+        if (
+          legacyError &&
+          typeof legacyError === 'object' &&
+          'code' in legacyError &&
+          (legacyError.code === 'ATTACHMENT_NOT_FOUND' || legacyError.code === 'ATTACHMENT_CORRUPT')
+        )
+          return { type: 'text', text: '[Image attachment unavailable]' };
+        throw legacyError;
+      }
+    }
     if (
       block.type === 'image' &&
       cause &&
@@ -2835,8 +2864,26 @@ export function apply(
             const emit = async (update: SessionNotification['update']) => {
               await conn.sessionUpdate({ sessionId, update });
             };
+            const legacyHome = process.env[ACP_EXTENSION_DSH_LEGACY_HOME_ENV];
+            type LocalAttachmentModule = {
+              readImageFile(
+                root: string,
+                ref: HarnessImageAttachmentRef
+              ): ReturnType<HarnessAttachmentStore['readImage']>;
+            };
+            let localModule: Promise<LocalAttachmentModule> | undefined;
+            const readLegacy: HarnessAttachmentStore['readImage'] | undefined = legacyHome
+              ? async (ref) => {
+                  const loader = ctx.get('loader') as { import(name: string): Promise<unknown> };
+                  localModule ??= loader.import(
+                    '@deepseek-ai/dsh-attachment-local'
+                  ) as Promise<LocalAttachmentModule>;
+                  const local = await localModule;
+                  return local.readImageFile(join(legacyHome, 'attachments', 'v1'), ref);
+                }
+              : undefined;
             const content = (block: { type: string }) =>
-              replayBlockToAcp(block as HarnessMessageBlock, attachments);
+              replayBlockToAcp(block as HarnessMessageBlock, attachments, readLegacy);
             const tools = new ToolCallBridge({
               cwd: observation.header.cwd,
               lookup: () => undefined,
