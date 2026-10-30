@@ -176,7 +176,10 @@ describe('DeepSeek Harness ACP adapter', () => {
     const live = new Map<string, Agent>();
     const stored = new Map<
       string,
-      { header: { id: string; agentPreset: string; cwd: string }; events: ForkEvent[] }
+      {
+        header: { id: string; agentPreset: string; cwd: string; createdAt?: number };
+        events: Array<ForkEvent & { time?: number }>;
+      }
     >();
     const mounted = new Map<string, unknown[]>();
     const flushed = new Set<string>();
@@ -301,6 +304,7 @@ describe('DeepSeek Harness ACP adapter', () => {
         if (name === 'llm') return DEFAULT_LLM_CATALOG;
         if (name === 'sessionQuery')
           return {
+            listSessions: async () => [...stored.values()].map(({ header }) => ({ header })),
             observeSession: async (id: string) => {
               const source = stored.get(id);
               if (!source) throw new Error('missing native session');
@@ -372,7 +376,7 @@ describe('DeepSeek Harness ACP adapter', () => {
       event('turn/end', { turn: 2, reason: { kind: 'completed' } }),
     ].map((value, seq) => ({ ...value, seq }));
     stored.set('cold-source', {
-      header: { id: 'cold-source', agentPreset: 'standard', cwd: '/source' },
+      header: { id: 'cold-source', agentPreset: 'standard', cwd: '/source', createdAt: 1000 },
       events,
     });
     return {
@@ -401,6 +405,27 @@ describe('DeepSeek Harness ACP adapter', () => {
       released: () => released,
     };
   }
+
+  it('lists the latest title and last activity, falling back to creation time', async () => {
+    const h = await forkHarness();
+    const source = h.stored.get('cold-source')!;
+    source.events.splice(
+      0,
+      source.events.length,
+      { type: 'session/title', seq: 0, time: 2000, data: { title: 'First' } },
+      { type: 'session/title', seq: 1, time: 3000, data: { title: 'Latest' } },
+      { type: 'user/message', seq: 2, time: 4000, data: {} }
+    );
+    const listed = await h.client.listSessions({ cwd: '/source' });
+    expect(listed.sessions).toMatchObject([
+      { sessionId: 'cold-source', title: 'Latest', updatedAt: new Date(4000).toISOString() },
+    ]);
+    source.events.splice(0);
+    expect((await h.client.listSessions({ cwd: '/source' })).sessions).toMatchObject([
+      { sessionId: 'cold-source', updatedAt: new Date(1000).toISOString() },
+    ]);
+    expect(h.released()).toBe(2);
+  });
 
   it('loads the original native identity, replays ordered history, and continues without a new session', async () => {
     const h = await forkHarness();

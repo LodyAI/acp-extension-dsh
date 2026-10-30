@@ -1493,7 +1493,8 @@ export function apply(
         lookup: (name) =>
           (
             agent.ctx.get('tools') as
-              { get(name: string, scope: HarnessAgent): ToolPresenter | undefined } | undefined
+              | { get(name: string, scope: HarnessAgent): ToolPresenter | undefined }
+              | undefined
           )?.get(name, agent),
         content: (block) => assistantBlockToAcp(block as HarnessMessageBlock, attachments),
         emit: async (update) => {
@@ -1587,7 +1588,8 @@ export function apply(
 
   const flushSession = async (session: HarnessSession): Promise<void> => {
     const store = ctx.get('sessions') as
-      { flush(session: HarnessSession): Promise<boolean> } | undefined;
+      | { flush(session: HarnessSession): Promise<boolean> }
+      | undefined;
     if (!store || !(await store.flush(session)))
       throw new Error('no session durability listener is available');
   };
@@ -1847,7 +1849,8 @@ export function apply(
       record.contextWindow > 0
     ) {
       const meter = ctx.get('tokenMeter') as
-        { measure(session: HarnessSession): { totalTokens: number } } | undefined;
+        | { measure(session: HarnessSession): { totalTokens: number } }
+        | undefined;
       if (meter) {
         const used = meter.measure(session).totalTokens;
         if (Number.isFinite(used) && used >= 0)
@@ -2461,7 +2464,8 @@ export function apply(
         cwd: params.cwd,
         lookup: (name) => {
           const tools = handle.agent.ctx.get('tools') as
-            { get(name: string, scope: HarnessAgent): ToolPresenter | undefined } | undefined;
+            | { get(name: string, scope: HarnessAgent): ToolPresenter | undefined }
+            | undefined;
           return tools?.get(name, handle.agent);
         },
         content: (block) => assistantBlockToAcp(block as HarnessMessageBlock, attachments),
@@ -2603,7 +2607,8 @@ export function apply(
               }
               const defaultPreset = (
                 (document as Record<string, unknown>)['agent-presets'] as
-                  { default?: unknown } | undefined
+                  | { default?: unknown }
+                  | undefined
               )?.default;
               if (
                 defaultPreset !== undefined &&
@@ -2697,7 +2702,14 @@ export function apply(
         assertOpen();
         if (params.cursor) throw invalidParams('session/list cursor is unsupported');
         const query = ctx.get('sessionQuery') as {
-          listSessions(): Promise<Array<{ header: { id: string; cwd?: string; origin?: string } }>>;
+          listSessions(): Promise<
+            Array<{ header: { id: string; cwd?: string; origin?: string; createdAt: number } }>
+          >;
+          observeSession(id: string): Promise<
+            ForkObservation & {
+              events: readonly { type: string; time: number; data: Record<string, unknown> }[];
+            }
+          >;
         };
         const rows = await query.listSessions();
         const result = [];
@@ -2706,9 +2718,29 @@ export function apply(
           const project = await projects?.read(header.id);
           if (params.cwd && params.cwd !== header.cwd && params.cwd !== project?.originProjectPath)
             continue;
+          let title: string | undefined;
+          let updatedAt = header.createdAt;
+          try {
+            const observation = await query.observeSession(header.id);
+            try {
+              for (const event of observation.events) {
+                if (event.type === 'session/title' && typeof event.data.title === 'string')
+                  title = event.data.title;
+                updatedAt = event.time;
+              }
+            } finally {
+              observation[Symbol.dispose]();
+            }
+          } catch (error) {
+            ctx.logger.warn(
+              `acp-extension-dsh: cannot read catalog metadata for ${header.id}: ${errorChain(error)}`
+            );
+          }
           result.push({
             sessionId: header.id,
             cwd: header.cwd,
+            ...(title ? { title } : {}),
+            updatedAt: new Date(updatedAt).toISOString(),
             ...(project ? { _meta: { lody: { worktreeProject: project } } } : {}),
           });
         }
