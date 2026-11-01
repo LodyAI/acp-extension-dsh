@@ -168,7 +168,13 @@ describe('DeepSeek Harness ACP adapter', () => {
     ],
   ] as const;
 
-  async function forkHarness() {
+  async function forkHarness(options?: {
+    readImage?: (ref: { attachmentId: string; mediaType: string }) => Promise<unknown>;
+    readLegacy?: (
+      root: string,
+      ref: { attachmentId: string; mediaType: string }
+    ) => Promise<unknown>;
+  }) {
     type Context = Parameters<typeof apply>[0];
     type Agent = Awaited<ReturnType<Context['agents']['create']>>['agent'];
     const streams = connectedStreams();
@@ -176,7 +182,10 @@ describe('DeepSeek Harness ACP adapter', () => {
     const live = new Map<string, Agent>();
     const stored = new Map<
       string,
-      { header: { id: string; agentPreset: string; cwd: string }; events: ForkEvent[] }
+      {
+        header: { id: string; agentPreset: string; cwd: string; createdAt?: number };
+        events: Array<ForkEvent & { time?: number }>;
+      }
     >();
     const mounted = new Map<string, unknown[]>();
     const flushed = new Set<string>();
@@ -299,8 +308,24 @@ describe('DeepSeek Harness ACP adapter', () => {
       },
       get: (name) => {
         if (name === 'llm') return DEFAULT_LLM_CATALOG;
+        if (name === 'attachments')
+          return {
+            imageLimits: { mediaTypes: ['image/png'] },
+            saveImages: async () => [],
+            readImage:
+              options?.readImage ??
+              (async () => {
+                throw Object.assign(new Error('missing'), { code: 'ATTACHMENT_NOT_FOUND' });
+              }),
+          };
+        if (name === 'loader' && options?.readLegacy)
+          return {
+            await: async () => {},
+            import: async () => ({ readImageFile: options.readLegacy }),
+          };
         if (name === 'sessionQuery')
           return {
+            listSessions: async () => [...stored.values()].map(({ header }) => ({ header })),
             observeSession: async (id: string) => {
               const source = stored.get(id);
               if (!source) throw new Error('missing native session');
@@ -372,7 +397,7 @@ describe('DeepSeek Harness ACP adapter', () => {
       event('turn/end', { turn: 2, reason: { kind: 'completed' } }),
     ].map((value, seq) => ({ ...value, seq }));
     stored.set('cold-source', {
-      header: { id: 'cold-source', agentPreset: 'standard', cwd: '/source' },
+      header: { id: 'cold-source', agentPreset: 'standard', cwd: '/source', createdAt: 1000 },
       events,
     });
     return {
@@ -401,6 +426,179 @@ describe('DeepSeek Harness ACP adapter', () => {
       released: () => released,
     };
   }
+
+  it('lists the latest title and last activity, falling back to creation time', async () => {
+    const h = await forkHarness();
+    const source = h.stored.get('cold-source')!;
+    source.events.splice(
+      0,
+      source.events.length,
+      { type: 'session/title', seq: 0, time: 2000, data: { title: 'First' } },
+      { type: 'session/title', seq: 1, time: 3000, data: { title: 'Latest' } },
+      { type: 'user/message', seq: 2, time: 4000, data: {} }
+    );
+    const listed = await h.client.listSessions({ cwd: '/source' });
+    expect(listed.sessions).toMatchObject([
+      { sessionId: 'cold-source', title: 'Latest', updatedAt: new Date(4000).toISOString() },
+    ]);
+    source.events.splice(0);
+    expect((await h.client.listSessions({ cwd: '/source' })).sessions).toMatchObject([
+      { sessionId: 'cold-source', updatedAt: new Date(1000).toISOString() },
+    ]);
+    expect(h.released()).toBe(2);
+  });
+
+  it('reads history images from the provider and then the legacy store only when missing', async () => {
+    vi.stubEnv('ACP_EXTENSION_DSH_LEGACY_HOME', '/legacy');
+    const legacyReads: string[] = [];
+    const h = await forkHarness({
+      readImage: async (ref) => {
+        if (ref.attachmentId === 'provider') return { ref, data: Buffer.from('provider') };
+        throw Object.assign(new Error('missing'), { code: 'ATTACHMENT_NOT_FOUND' });
+      },
+      readLegacy: async (root, ref) => {
+        expect(root).toBe('/legacy/attachments/v1');
+        legacyReads.push(ref.attachmentId);
+        if (ref.attachmentId === 'legacy') return { ref, data: Buffer.from('legacy') };
+        throw Object.assign(new Error('missing'), { code: 'ATTACHMENT_NOT_FOUND' });
+      },
+    });
+    const source = h.stored.get('cold-source')!;
+    source.events.push({
+      type: 'assistant/message',
+      seq: source.events.length,
+      data: {
+        message: {
+          content: ['provider', 'legacy', 'missing'].map((attachmentId) => ({
+            type: 'image',
+            attachment: { attachmentId, mediaType: 'image/png' },
+          })),
+        },
+      },
+    });
+    await h.client.extMethod('_lody/session/history/read', { sessionId: 'cold-source' });
+    const content = (h.updates as Array<{ update: { content?: unknown } }>).map(
+      ({ update }) => update.content
+    );
+    expect(content).toContainEqual({
+      type: 'image',
+      data: Buffer.from('provider').toString('base64'),
+      mimeType: 'image/png',
+    });
+    expect(content).toContainEqual({
+      type: 'image',
+      data: Buffer.from('legacy').toString('base64'),
+      mimeType: 'image/png',
+    });
+    expect(content).toContainEqual({ type: 'text', text: '[Image attachment unavailable]' });
+    expect(legacyReads).toEqual(['legacy', 'missing']);
+  });
+
+  it('does not conceal attachment storage errors during history import', async () => {
+    vi.stubEnv('ACP_EXTENSION_DSH_LEGACY_HOME', '/legacy');
+    let legacyRead = false;
+    const h = await forkHarness({
+      readImage: async () => {
+        throw Object.assign(new Error('permission denied'), { code: 'ATTACHMENT_READ_FAILED' });
+      },
+      readLegacy: async () => {
+        legacyRead = true;
+        throw new Error('legacy store must not be read');
+      },
+    });
+    const source = h.stored.get('cold-source')!;
+    source.events.push({
+      type: 'assistant/message',
+      seq: source.events.length,
+      data: {
+        message: {
+          content: [
+            { type: 'image', attachment: { attachmentId: 'image', mediaType: 'image/png' } },
+          ],
+        },
+      },
+    });
+    await expect(
+      h.client.extMethod('_lody/session/history/read', { sessionId: 'cold-source' })
+    ).rejects.toThrow();
+    expect(legacyRead).toBe(false);
+  });
+
+  it.each(['ATTACHMENT_CORRUPT', 'ATTACHMENT_READ_FAILED'])(
+    'handles a legacy attachment failure with code %s',
+    async (code) => {
+      vi.stubEnv('ACP_EXTENSION_DSH_LEGACY_HOME', '/legacy');
+      const h = await forkHarness({
+        readLegacy: async () => {
+          throw Object.assign(new Error(code), { code });
+        },
+      });
+      const source = h.stored.get('cold-source')!;
+      source.events.push({
+        type: 'assistant/message',
+        seq: source.events.length,
+        data: {
+          message: {
+            content: [
+              { type: 'image', attachment: { attachmentId: 'image', mediaType: 'image/png' } },
+            ],
+          },
+        },
+      });
+      const replay = h.client.extMethod('_lody/session/history/read', { sessionId: 'cold-source' });
+      if (code === 'ATTACHMENT_CORRUPT') {
+        await replay;
+        expect(h.updates).toContainEqual(
+          expect.objectContaining({
+            update: expect.objectContaining({
+              content: { type: 'text', text: '[Image attachment unavailable]' },
+            }),
+          })
+        );
+      } else {
+        await expect(replay).rejects.toThrow();
+      }
+    }
+  );
+
+  it('replays remaining messages when an image attachment is unavailable', async () => {
+    const h = await forkHarness();
+    const source = h.stored.get('cold-source')!;
+    source.events.push({
+      type: 'assistant/message',
+      seq: source.events.length,
+      data: {
+        message: {
+          content: [
+            {
+              type: 'image',
+              attachment: {
+                attachmentId: 'missing',
+                mediaType: 'image/png',
+                bytes: 3,
+                width: 1,
+                height: 1,
+              },
+            },
+            { type: 'text', text: 'still available' },
+          ],
+        },
+      },
+    });
+    await h.client.loadSession({ sessionId: 'cold-source', cwd: '/source', mcpServers: [] });
+    expect(h.updates).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          update: expect.objectContaining({
+            content: { type: 'text', text: '[Image attachment unavailable]' },
+          }),
+        }),
+        expect.objectContaining({
+          update: expect.objectContaining({ content: { type: 'text', text: 'still available' } }),
+        }),
+      ])
+    );
+  });
 
   it('loads the original native identity, replays ordered history, and continues without a new session', async () => {
     const h = await forkHarness();
@@ -563,12 +761,12 @@ describe('DeepSeek Harness ACP adapter', () => {
       seq: source.events.length,
       data: {
         turn: 2,
-        message: { content: [{ type: 'image', attachment: { attachmentId: 'missing' } }] },
+        message: { content: 'invalid' },
       },
     });
-    await expect(h.client.loadSession(request)).rejects.toThrow('attachment');
+    await expect(h.client.loadSession(request)).rejects.toThrow('Invalid persisted message');
     expect(h.live.size).toBe(0);
-    // Resume needs no historic attachment reads; the original native log remains usable.
+    // Resume does not replay historic messages.
     await h.client.resumeSession(request);
     expect(h.live.has(request.sessionId)).toBe(true);
   });

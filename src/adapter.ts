@@ -86,6 +86,7 @@ import {
 } from './capabilities.js';
 import {
   ACP_EXTENSION_DSH_VERSION,
+  ACP_EXTENSION_DSH_LEGACY_HOME_ENV,
   DEEPSEEK_HARNESS_DEFAULT_MODEL,
   DEEPSEEK_HARNESS_PROVIDER,
 } from './profile.js';
@@ -1115,6 +1116,54 @@ async function assistantBlockToAcp(
   };
 }
 
+async function replayBlockToAcp(
+  block: HarnessMessageBlock,
+  attachments: HarnessAttachmentStore | undefined,
+  readLegacy?: HarnessAttachmentStore['readImage']
+): Promise<ContentBlock | undefined> {
+  try {
+    return await assistantBlockToAcp(block, attachments);
+  } catch (error) {
+    const cause = error instanceof Error ? error.cause : undefined;
+    if (
+      block.type === 'image' &&
+      'attachment' in block &&
+      readLegacy &&
+      cause &&
+      typeof cause === 'object' &&
+      'code' in cause &&
+      cause.code === 'ATTACHMENT_NOT_FOUND'
+    ) {
+      try {
+        const stored = await readLegacy(block.attachment);
+        return {
+          type: 'image',
+          data: Buffer.from(stored.data).toString('base64'),
+          mimeType: stored.ref.mediaType,
+        };
+      } catch (legacyError) {
+        if (
+          legacyError &&
+          typeof legacyError === 'object' &&
+          'code' in legacyError &&
+          (legacyError.code === 'ATTACHMENT_NOT_FOUND' || legacyError.code === 'ATTACHMENT_CORRUPT')
+        )
+          return { type: 'text', text: '[Image attachment unavailable]' };
+        throw legacyError;
+      }
+    }
+    if (
+      block.type === 'image' &&
+      cause &&
+      typeof cause === 'object' &&
+      'code' in cause &&
+      (cause.code === 'ATTACHMENT_NOT_FOUND' || cause.code === 'ATTACHMENT_CORRUPT')
+    )
+      return { type: 'text', text: '[Image attachment unavailable]' };
+    throw error;
+  }
+}
+
 function createUserMessage(
   id: string,
   content: Array<HarnessTextBlock | HarnessImageBlock>
@@ -1493,7 +1542,8 @@ export function apply(
         lookup: (name) =>
           (
             agent.ctx.get('tools') as
-              { get(name: string, scope: HarnessAgent): ToolPresenter | undefined } | undefined
+              | { get(name: string, scope: HarnessAgent): ToolPresenter | undefined }
+              | undefined
           )?.get(name, agent),
         content: (block) => assistantBlockToAcp(block as HarnessMessageBlock, attachments),
         emit: async (update) => {
@@ -1587,7 +1637,8 @@ export function apply(
 
   const flushSession = async (session: HarnessSession): Promise<void> => {
     const store = ctx.get('sessions') as
-      { flush(session: HarnessSession): Promise<boolean> } | undefined;
+      | { flush(session: HarnessSession): Promise<boolean> }
+      | undefined;
     if (!store || !(await store.flush(session)))
       throw new Error('no session durability listener is available');
   };
@@ -1847,7 +1898,8 @@ export function apply(
       record.contextWindow > 0
     ) {
       const meter = ctx.get('tokenMeter') as
-        { measure(session: HarnessSession): { totalTokens: number } } | undefined;
+        | { measure(session: HarnessSession): { totalTokens: number } }
+        | undefined;
       if (meter) {
         const used = meter.measure(session).totalTokens;
         if (Number.isFinite(used) && used >= 0)
@@ -2461,7 +2513,8 @@ export function apply(
         cwd: params.cwd,
         lookup: (name) => {
           const tools = handle.agent.ctx.get('tools') as
-            { get(name: string, scope: HarnessAgent): ToolPresenter | undefined } | undefined;
+            | { get(name: string, scope: HarnessAgent): ToolPresenter | undefined }
+            | undefined;
           return tools?.get(name, handle.agent);
         },
         content: (block) => assistantBlockToAcp(block as HarnessMessageBlock, attachments),
@@ -2510,7 +2563,7 @@ export function apply(
           replay: restore.replay,
           tools: record.tools,
           usage: record.usage,
-          content: (block) => assistantBlockToAcp(block as HarnessMessageBlock, attachments),
+          content: (block) => replayBlockToAcp(block as HarnessMessageBlock, attachments),
           emit: async (update) => {
             await conn.sessionUpdate({ sessionId, update });
           },
@@ -2603,7 +2656,8 @@ export function apply(
               }
               const defaultPreset = (
                 (document as Record<string, unknown>)['agent-presets'] as
-                  { default?: unknown } | undefined
+                  | { default?: unknown }
+                  | undefined
               )?.default;
               if (
                 defaultPreset !== undefined &&
@@ -2697,7 +2751,14 @@ export function apply(
         assertOpen();
         if (params.cursor) throw invalidParams('session/list cursor is unsupported');
         const query = ctx.get('sessionQuery') as {
-          listSessions(): Promise<Array<{ header: { id: string; cwd?: string; origin?: string } }>>;
+          listSessions(): Promise<
+            Array<{ header: { id: string; cwd?: string; origin?: string; createdAt: number } }>
+          >;
+          observeSession(id: string): Promise<
+            ForkObservation & {
+              events: readonly { type: string; time: number; data: Record<string, unknown> }[];
+            }
+          >;
         };
         const rows = await query.listSessions();
         const result = [];
@@ -2706,9 +2767,29 @@ export function apply(
           const project = await projects?.read(header.id);
           if (params.cwd && params.cwd !== header.cwd && params.cwd !== project?.originProjectPath)
             continue;
+          let title: string | undefined;
+          let updatedAt = header.createdAt;
+          try {
+            const observation = await query.observeSession(header.id);
+            try {
+              for (const event of observation.events) {
+                if (event.type === 'session/title' && typeof event.data.title === 'string')
+                  title = event.data.title;
+                updatedAt = event.time;
+              }
+            } finally {
+              observation[Symbol.dispose]();
+            }
+          } catch (error) {
+            ctx.logger.warn(
+              `acp-extension-dsh: cannot read catalog metadata for ${header.id}: ${errorChain(error)}`
+            );
+          }
           result.push({
             sessionId: header.id,
             cwd: header.cwd,
+            ...(title ? { title } : {}),
+            updatedAt: new Date(updatedAt).toISOString(),
             ...(project ? { _meta: { lody: { worktreeProject: project } } } : {}),
           });
         }
@@ -2810,8 +2891,26 @@ export function apply(
             const emit = async (update: SessionNotification['update']) => {
               await conn.sessionUpdate({ sessionId, update });
             };
+            const legacyHome = process.env[ACP_EXTENSION_DSH_LEGACY_HOME_ENV];
+            type LocalAttachmentModule = {
+              readImageFile(
+                root: string,
+                ref: HarnessImageAttachmentRef
+              ): ReturnType<HarnessAttachmentStore['readImage']>;
+            };
+            let localModule: Promise<LocalAttachmentModule> | undefined;
+            const readLegacy: HarnessAttachmentStore['readImage'] | undefined = legacyHome
+              ? async (ref) => {
+                  const loader = ctx.get('loader') as { import(name: string): Promise<unknown> };
+                  localModule ??= loader.import(
+                    '@deepseek-ai/dsh-attachment-local'
+                  ) as Promise<LocalAttachmentModule>;
+                  const local = await localModule;
+                  return local.readImageFile(join(legacyHome, 'attachments', 'v1'), ref);
+                }
+              : undefined;
             const content = (block: { type: string }) =>
-              assistantBlockToAcp(block as HarnessMessageBlock, attachments);
+              replayBlockToAcp(block as HarnessMessageBlock, attachments, readLegacy);
             const tools = new ToolCallBridge({
               cwd: observation.header.cwd,
               lookup: () => undefined,
