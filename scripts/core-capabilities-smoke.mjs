@@ -22,7 +22,7 @@ const signal = () => {
 };
 
 await test('projects tool results built by the pinned native message constructor', async () => {
-  assert.equal(requireRuntime('@deepseek-ai/dsh-llm/package.json').version, '0.2.1-rc.2');
+  assert.equal(requireRuntime('@deepseek-ai/dsh-llm/package.json').version, '0.2.2-rc.1');
   const { createToolResultMessage } = await load('dsh-llm');
   const updates = [];
   const bridge = new ToolCallBridge({
@@ -91,6 +91,7 @@ await test(
         'dsh-agent',
       ])
         await ctx.plugin((await load(name)).default).await();
+      await ctx.plugin(await load('dsh-tool-executor-native')).await();
       const persistence = await load('dsh-session-persistence-jsonl');
       await ctx
         .plugin(persistence.default ?? persistence, {
