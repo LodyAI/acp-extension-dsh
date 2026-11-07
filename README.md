@@ -397,3 +397,31 @@ Native behavioral probe (synthetic model and isolated storage):
 ```sh
 DSH_TEST_RUNTIME_ROOT=/path/to/pinned/node_modules node --test scripts/core-capabilities-smoke.mjs
 ```
+
+## Client system prompts
+
+The adapter advertises `sessionCapabilities.systemPrompt.mode.override` and accepts
+standard ACP `systemPrompt` on `session/new`, `session/load`, `session/resume`, and
+`session/fork`:
+
+```json
+{
+  "systemPrompt": {
+    "mode": "append",
+    "content": [{ "type": "text", "text": "Use the project's terminology." }]
+  }
+}
+```
+
+`append` adds instructions to the native prompt; `override` replaces its base
+instructions. Content must contain at least one text block; unsupported modes or
+content return `invalidParams` (-32602). These instructions do not change tool
+permissions or remove required runtime context. They apply to the requested
+session, not sibling sessions. Pass them again when reconnecting or forking to
+ensure the same instructions are used.
+
+Instructions are registered with Harness's native system-prompt service as literal
+text (template interpolation is disabled). Override uses its complete-prompt section;
+tool definitions and runtime context remain managed by Harness. Close an active
+session before load/resume with new instructions. Omission or `null` uses the native
+preset; instructions are not saved as a persistent session setting.

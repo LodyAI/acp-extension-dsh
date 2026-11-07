@@ -132,3 +132,5 @@ See README for scope and native validation.
 
 Use native resume with original ID/cwd and fresh MCP; reject subagents/duplicate
 activation and clean up failures. Load replays history, resume does not. See README.
+
+- Apply standard ACP `systemPrompt` through session-scoped native Harness prompt sections with interpolation disabled. Override uses a complete section and must not replace tool or permission services.

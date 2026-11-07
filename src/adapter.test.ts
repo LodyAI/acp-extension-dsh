@@ -979,6 +979,7 @@ describe('DeepSeek Harness ACP adapter', () => {
     vi.stubGlobal('fetch', fetchModels);
     const streams = connectedStreams();
     const scopedListeners = new Map<string, Listener>();
+    const promptSections = new Map<string, unknown>();
     const harnessListeners = new Map<string, Listener>();
     const permissionSwitches: string[] = [];
     const agentPresetSwitches: string[] = [];
@@ -1031,15 +1032,22 @@ describe('DeepSeek Harness ACP adapter', () => {
         async create(options) {
           const agentContext: Parameters<typeof options.setup>[0] = {
             get: (name) =>
-              name === 'planMode' && hasPlanService
+              name === 'systemPrompt'
                 ? {
-                    get: () => ({ active: planActive, pending: planPending }),
-                    set: (_agent: unknown, active: boolean) => {
-                      planActive = active;
-                      return 'committed';
+                    section: (section: unknown) => {
+                      promptSections.set(options.sessionId, section);
+                      return () => promptSections.delete(options.sessionId);
                     },
                   }
-                : undefined,
+                : name === 'planMode' && hasPlanService
+                  ? {
+                      get: () => ({ active: planActive, pending: planPending }),
+                      set: (_agent: unknown, active: boolean) => {
+                        planActive = active;
+                        return 'committed';
+                      },
+                    }
+                  : undefined,
             on<TArgs extends unknown[]>(
               event: string,
               listener: (...args: TArgs) => unknown
@@ -1170,7 +1178,27 @@ describe('DeepSeek Harness ACP adapter', () => {
       },
     });
 
-    const created = await client.newSession({ cwd: process.cwd(), mcpServers: [] });
+    await expect(
+      client.newSession({
+        cwd: process.cwd(),
+        mcpServers: [],
+        systemPrompt: { mode: 'unknown', content: [{ type: 'text', text: 'Invalid' }] },
+      })
+    ).rejects.toMatchObject({ code: -32602 });
+    expect(promptSections.size).toBe(0);
+    const created = await client.newSession({
+      cwd: process.cwd(),
+      mcpServers: [],
+      systemPrompt: {
+        mode: 'append',
+        content: [{ type: 'text', text: 'Literal {{client}} instructions' }],
+      },
+    });
+    expect(promptSections.get(created.sessionId)).toMatchObject({
+      text: 'Literal {{client}} instructions',
+      interpolate: false,
+      complete: false,
+    });
     harnessListeners.get('session/event')?.(createdHarnessSession, {
       type: 'request/context',
       seq: 10,
@@ -1478,6 +1506,19 @@ describe('DeepSeek Harness ACP adapter', () => {
         value: 'high',
       })
     ).rejects.toThrow(/does not support reasoning effort/u);
+    const overridden = await client.newSession({
+      cwd: process.cwd(),
+      mcpServers: [],
+      systemPrompt: { mode: 'override', content: [{ type: 'text', text: 'Replacement' }] },
+    });
+    expect(promptSections.get(overridden.sessionId)).toMatchObject({
+      text: 'Replacement',
+      complete: true,
+    });
+    expect(promptSections.get(created.sessionId)).toMatchObject({
+      text: 'Literal {{client}} instructions',
+      complete: false,
+    });
   });
 
   it('mounts ACP MCP servers in the Agent scope and releases their namespaces on close', async () => {
