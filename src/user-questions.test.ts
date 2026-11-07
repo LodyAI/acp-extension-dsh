@@ -65,7 +65,7 @@ describe('Harness user questions over ACP', () => {
       () => ({
         sessionUpdate: async () => {},
         requestPermission: async () => ({ outcome: { outcome: 'cancelled' } }),
-        unstable_createElicitation: async (request) => {
+        createElicitation: async (request) => {
           requests.push(request);
           return {
             action: 'accept',
@@ -82,7 +82,7 @@ describe('Harness user questions over ACP', () => {
     );
     const bridge = new UserQuestionBridge(
       'session',
-      (request) => agent.unstable_createElicitation(request),
+      (request) => agent.createElicitation(request),
       () => ({ form: true, answerNotes: true })
     );
     try {

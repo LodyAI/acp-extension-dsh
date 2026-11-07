@@ -1,3 +1,4 @@
+import { readClientSystemPrompt } from './client-system-prompt.js';
 import { ProjectMetadata } from './project-metadata.js';
 import { goalSnapshot, type GoalService } from './goals.js';
 import {
@@ -1194,6 +1195,7 @@ function errorChain(value: unknown): string {
 }
 
 function validateSessionParams(params: NewSessionRequest): void {
+  readClientSystemPrompt(params.systemPrompt);
   if (!isAbsolute(params.cwd)) {
     throw invalidParams(`cwd must be an absolute path: ${params.cwd}`);
   }
@@ -1542,8 +1544,7 @@ export function apply(
         lookup: (name) =>
           (
             agent.ctx.get('tools') as
-              | { get(name: string, scope: HarnessAgent): ToolPresenter | undefined }
-              | undefined
+              { get(name: string, scope: HarnessAgent): ToolPresenter | undefined } | undefined
           )?.get(name, agent),
         content: (block) => assistantBlockToAcp(block as HarnessMessageBlock, attachments),
         emit: async (update) => {
@@ -1637,8 +1638,7 @@ export function apply(
 
   const flushSession = async (session: HarnessSession): Promise<void> => {
     const store = ctx.get('sessions') as
-      | { flush(session: HarnessSession): Promise<boolean> }
-      | undefined;
+      { flush(session: HarnessSession): Promise<boolean> } | undefined;
     if (!store || !(await store.flush(session)))
       throw new Error('no session durability listener is available');
   };
@@ -1898,8 +1898,7 @@ export function apply(
       record.contextWindow > 0
     ) {
       const meter = ctx.get('tokenMeter') as
-        | { measure(session: HarnessSession): { totalTokens: number } }
-        | undefined;
+        { measure(session: HarnessSession): { totalTokens: number } } | undefined;
       if (meter) {
         const used = meter.measure(session).totalTokens;
         if (Number.isFinite(used) && used >= 0)
@@ -2327,6 +2326,7 @@ export function apply(
   ): Promise<NewSessionResponseWithModels> => {
     assertOpen();
     validateSessionParams(params);
+    const clientPrompt = readClientSystemPrompt(params.systemPrompt);
     const projectInput = (params._meta?.lody as LodySessionMeta | undefined)?.worktreeProject;
     if (projectInput && !projects) throw invalidParams('worktreeProject is unavailable');
     const project =
@@ -2355,7 +2355,7 @@ export function apply(
     const sessionId = restore?.sessionId ?? randomUUID();
     const questions = new UserQuestionBridge(
       sessionId,
-      (request) => conn.unstable_createElicitation(request),
+      (request) => conn.createElicitation(request),
       () => questionCapabilities
     );
     const initialModel = models.find(
@@ -2464,6 +2464,27 @@ export function apply(
           }
         );
         mountedPreset = (await ctx.agentPresets.mount(agentContext, requestedPreset)).id;
+        if (clientPrompt) {
+          const systemPrompt = agentContext.get('systemPrompt') as
+            | {
+                section(section: {
+                  name: string;
+                  order: number;
+                  text: string;
+                  interpolate: boolean;
+                  complete: boolean;
+                }): unknown;
+              }
+            | undefined;
+          if (!systemPrompt) throw internalError('Harness system prompt service is unavailable');
+          systemPrompt.section({
+            name: 'acp:system-prompt',
+            order: Number.MAX_SAFE_INTEGER,
+            text: clientPrompt.text,
+            interpolate: false,
+            complete: clientPrompt.mode === 'override',
+          });
+        }
         await mountMcpServers(agentContext, params.mcpServers, mcpServerNames.names, params.cwd);
       };
       handle = restore
@@ -2513,8 +2534,7 @@ export function apply(
         cwd: params.cwd,
         lookup: (name) => {
           const tools = handle.agent.ctx.get('tools') as
-            | { get(name: string, scope: HarnessAgent): ToolPresenter | undefined }
-            | undefined;
+            { get(name: string, scope: HarnessAgent): ToolPresenter | undefined } | undefined;
           return tools?.get(name, handle.agent);
         },
         content: (block) => assistantBlockToAcp(block as HarnessMessageBlock, attachments),
@@ -2656,8 +2676,7 @@ export function apply(
               }
               const defaultPreset = (
                 (document as Record<string, unknown>)['agent-presets'] as
-                  | { default?: unknown }
-                  | undefined
+                  { default?: unknown } | undefined
               )?.default;
               if (
                 defaultPreset !== undefined &&
@@ -2708,7 +2727,13 @@ export function apply(
             },
             mcpCapabilities: { http: true },
             loadSession: true,
-            sessionCapabilities: { close: {}, fork: {}, resume: {}, list: {} },
+            sessionCapabilities: {
+              close: {},
+              fork: {},
+              resume: {},
+              list: {},
+              systemPrompt: { mode: { override: {} } },
+            },
             _meta: {
               lody: {
                 ...LODY_CAPABILITIES,
@@ -2988,6 +3013,7 @@ export function apply(
           cwd: params.cwd,
           mcpServers: params.mcpServers ?? [],
           additionalDirectories: params.additionalDirectories,
+          systemPrompt: params.systemPrompt,
           _meta: params._meta,
         };
         validateSessionParams(creation);
