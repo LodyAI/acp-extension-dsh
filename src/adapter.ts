@@ -1165,6 +1165,25 @@ async function replayBlockToAcp(
   }
 }
 
+/**
+ * Harness-internal wake sources that must pass pre-step admission without an
+ * ACP prompt in flight: a settled subagent's completion notice, a direct child
+ * message, and a finished background job. Rejecting those turns dropped the
+ * claimed notice before it was committed, so the parent session never reacted
+ * (LodyAI/Lody#2503).
+ */
+type InternalWakeSource = 'subagent-settled' | 'agent-message' | 'tool-jobs';
+
+function isInternalWakeSource(kind: string | undefined): kind is InternalWakeSource {
+  return kind === 'subagent-settled' || kind === 'agent-message' || kind === 'tool-jobs';
+}
+
+function wokenByInternalNotice(
+  messages: readonly { source?: { kind?: string } }[] | undefined
+): boolean {
+  return (messages ?? []).some((message) => isInternalWakeSource(message.source?.kind));
+}
+
 function createUserMessage(
   id: string,
   content: Array<HarnessTextBlock | HarnessImageBlock>
@@ -2097,22 +2116,33 @@ export function apply(
   ctx.on(
     'agent/pre-step',
     async (
-      { agent, turn }: { agent: HarnessAgent; turn: number },
+      {
+        agent,
+        turn,
+        messages,
+      }: {
+        agent: HarnessAgent;
+        turn: number;
+        messages?: readonly { source?: { kind?: string } }[];
+      },
       next: () => Promise<{ kind: 'reject' } | { kind: 'enter'; messages: HarnessUserMessage[] }>
     ) => {
       const record = ownedRecord(agent);
-      if (record && (!record.inflight || record.inflight.cancelRequested))
-        return { kind: 'reject' };
+      if (record && record.inflight?.cancelRequested) return { kind: 'reject' };
+      // Without an ACP prompt in flight, admit only turns woken by a
+      // Harness-internal notice; anything else would spend model turns with no
+      // human prompt to settle.
+      if (record && !record.inflight && !wokenByInternalNotice(messages)) return { kind: 'reject' };
       const decision = await next();
       if (!record || decision.kind !== 'enter') return decision;
-      const messages = decision.messages.filter((message) => {
+      const admitted = decision.messages.filter((message) => {
         const pending = record.steering?.get(message.id);
         if (!pending || pending.turn === turn) return true;
         record.steering!.delete(message.id);
         pending.resolve({ outcome: 'failed' });
         return false;
       });
-      return { ...decision, messages };
+      return { ...decision, messages: admitted };
     }
   );
 

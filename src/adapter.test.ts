@@ -2042,6 +2042,7 @@ describe('DeepSeek Harness ACP adapter', () => {
       streamEvent,
       currentAgent: () => createdAgent!,
       claim: globalListeners.get('agent/inbox/claimed')!,
+      preStep: globalListeners.get('agent/pre-step')!,
       approval: globalListeners.get('approval/request')!,
       spawnChild: (id: string, nativeId: string, parent = createdAgent!) => {
         const agent = {
@@ -2875,5 +2876,140 @@ describe('DeepSeek Harness ACP adapter', () => {
     markIdle?.();
 
     await expect(prompt).rejects.toThrow(/turn failed: provider failed/u);
+  });
+
+  it('admits pre-step turns woken by internal notices while no ACP prompt is in flight', async () => {
+    const h = await streamingHarness(() => {});
+    for (const kind of ['subagent-settled', 'agent-message', 'tool-jobs'] as const) {
+      const notice = {
+        id: `notice-${kind}`,
+        role: 'user',
+        content: [{ type: 'text', text: 'Background subagent child-1 finished.' }],
+        source: { kind },
+      };
+      const decision = await h.preStep(
+        { agent: h.agent, turn: 4, messages: [notice] },
+        async () => ({ kind: 'enter', messages: [notice] })
+      );
+      expect(decision.kind).toBe('enter');
+    }
+  });
+
+  it('rejects pre-step turns without an ACP prompt or an internal wake', async () => {
+    const h = await streamingHarness(() => {});
+    const queued = {
+      id: 'queued-1',
+      role: 'user',
+      content: [{ type: 'text', text: 'continue' }],
+      source: { kind: 'user' },
+    };
+    const next = vi.fn(async () => ({ kind: 'enter', messages: [queued] }));
+    const decision = await h.preStep({ agent: h.agent, turn: 5, messages: [queued] }, next);
+    expect(decision).toEqual({ kind: 'reject' });
+    expect(next).not.toHaveBeenCalled();
+  });
+
+  it('rejects pre-step turns for a cancelled ACP prompt even with an internal notice waiting', async () => {
+    type AdapterContext = Parameters<typeof apply>[0];
+    type TestAgent = NonNullable<ReturnType<AdapterContext['agents']['get']>>;
+
+    const streams = connectedStreams();
+    const globalListeners = new Map<string, Listener>();
+    let createdAgent: TestAgent | undefined;
+    let markQueued: (() => void) | undefined;
+    const queued = new Promise<void>((resolve) => {
+      markQueued = resolve;
+    });
+    let markIdle: (() => void) | undefined;
+    const idle = new Promise<void>((resolve) => {
+      markIdle = resolve;
+    });
+    const context: AdapterContext = {
+      agents: {
+        async create(options) {
+          const agentContext: Parameters<typeof options.setup>[0] = {
+            get: () => undefined,
+            on: () => () => undefined,
+            plugin: () => ({ await: () => Promise.resolve() }),
+            loader: {
+              import: () => Promise.resolve({}),
+              unwrapExports: (exports: unknown) => exports,
+            },
+          };
+          await options.setup(agentContext);
+          createdAgent = {
+            id: options.sessionId,
+            ctx: agentContext,
+            session: {
+              id: options.sessionId,
+              header: { id: options.sessionId },
+              events: [],
+              append: vi.fn(),
+            },
+            followup: () => markQueued?.(),
+            cancel: vi.fn(),
+            whenIdle: () => idle,
+          };
+          return { agent: createdAgent, dispose: () => Promise.resolve() };
+        },
+        get: (sessionId: string) => (createdAgent?.id === sessionId ? createdAgent : undefined),
+      },
+      permissionPresets: {
+        names: ['workspace-write'],
+        defaultPreset: 'workspace-write',
+        current: () => 'workspace-write',
+        optionOf: permissionOption,
+        set: vi.fn(),
+      },
+      agentPresets: {
+        defaultId: 'standard',
+        list: async () => [{ id: 'standard' }],
+        mount: async (_agentContext: unknown, id = 'standard') => ({ id }),
+        select: async (_agent: unknown, id: string) => id,
+      },
+      logger: { warn: vi.fn() },
+      on<TArgs extends unknown[]>(event: string, listener: (...args: TArgs) => unknown) {
+        globalListeners.set(event, listener as Listener);
+        return () => globalListeners.delete(event);
+      },
+      get: testHarnessService,
+      effect: (register: () => () => void) => {
+        disposers.push(register());
+      },
+    };
+
+    apply(context, { stream: streams.agent });
+    const client = new ClientSideConnection(
+      () => ({
+        requestPermission: async () => ({ outcome: { outcome: 'cancelled' as const } }),
+        sessionUpdate: async () => undefined,
+      }),
+      streams.client
+    );
+    await client.initialize({ protocolVersion: PROTOCOL_VERSION, clientCapabilities: {} });
+    const session = await client.newSession({ cwd: process.cwd(), mcpServers: [] });
+    const prompt = client.prompt({
+      sessionId: session.sessionId,
+      prompt: [{ type: 'text', text: 'first' }],
+    });
+    await queued;
+    await client.cancel({ sessionId: session.sessionId });
+
+    const preStep = globalListeners.get('agent/pre-step');
+    if (!preStep || !createdAgent) throw new Error('missing Harness lifecycle listeners');
+    const notice = {
+      id: 'notice-1',
+      role: 'user',
+      content: [{ type: 'text', text: 'Background subagent child-1 finished.' }],
+      source: { kind: 'subagent-settled' },
+    };
+    const next = vi.fn(async () => ({ kind: 'enter', messages: [notice] }));
+    await expect(
+      preStep({ agent: createdAgent, turn: 2, messages: [notice] }, next)
+    ).resolves.toEqual({ kind: 'reject' });
+    expect(next).not.toHaveBeenCalled();
+
+    markIdle?.();
+    await expect(prompt).resolves.toEqual({ stopReason: 'cancelled' });
   });
 });
