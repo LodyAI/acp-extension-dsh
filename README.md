@@ -356,7 +356,7 @@ are not part of these tests.
 ## Core controls
 
 The generated Harness 0.2.2-rc.1 profile (v21) exposes Core sessionHistory,
-steering, subagents, goal, tasks.background and worktreeProject in addition to
+sessionActivity, steering, subagents, goal, tasks.background and worktreeProject in addition to
 forkAtTurn, subagentEvents, sessionTitle, compaction and cumulative usage.
 Goal, task and project declarations require their backing service/configuration.
 
@@ -374,8 +374,15 @@ Goal, task and project declarations require their backing service/configuration.
   `limited`; no token-budget or elapsed-usage values are invented. Fallback
   prompt text is ignored for these native controls.
 - Background jobs project owner-scoped task lifecycle without reading the
-  model's output cursor. Preset registration sets native job completion delivery
-  to `quiet`; idle notifications wait for later owned input. Retry waits use Core
+  model's output cursor. Presets keep the native `wakeup` completion delivery: a
+  job that settles while no ACP prompt is open opens a native turn, and its
+  output streams as ordinary session updates after the last prompt. Only a turn
+  that claimed a `tool-jobs` notice may start outside a prompt. Core
+  `sessionActivity` reports `running` while a native turn runs and counts the
+  session's live jobs, so a host keeps the process alive until those jobs settle
+  and their wake turn ends. The job registry is in-process: a job does not
+  survive the ACP process, and `job_output` cannot read it from a later process.
+  Retry waits use Core
   activity metadata. Standard `usage_update` reports current context pressure,
   independently of cumulative Core token accounting.
 - `worktreeProject` validates an existing absolute directory and persists an
