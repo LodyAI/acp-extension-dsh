@@ -70,6 +70,7 @@ import {
 import type {
   LodyActivityMeta,
   LodyExtensionCapabilities,
+  LodySessionActivityUpdate,
   LodySessionMeta,
   LodySubagentTask,
   LodyTaskMeta,
@@ -189,6 +190,7 @@ const LODY_CAPABILITIES = {
   compaction: { version: 1 },
   usage: { version: 1 },
   sessionHistory: { version: 1 },
+  sessionActivity: { version: 1 },
   steering: { version: 1, transport: 'request', upstreamTurn: 'same', configPolicy: 'active' },
   subagents: { version: 1, lifecycle: true, list: true, output: true, cancel: true },
 } as const satisfies LodyExtensionCapabilities;
@@ -218,6 +220,12 @@ type HarnessUserMessage = {
   content: Array<HarnessTextBlock | HarnessImageBlock>;
   source: { kind: 'user' };
 };
+
+/** A claimed inbox message as the pre-step waterfall sees it. */
+type HarnessClaimedMessage = { id: string; source?: { kind?: string } };
+
+/** Source kind of `@deepseek-ai/dsh-tool-jobs` completion notices. */
+const JOB_NOTICE_SOURCE = 'tool-jobs';
 
 type HarnessAttachmentStore = {
   imageLimits: { mediaTypes: readonly string[] };
@@ -419,6 +427,10 @@ type SessionRecord = {
     { steerId: string; turn: number; resolve(value: { outcome: 'injected' | 'failed' }): void }
   >;
   inflight?: InflightPrompt;
+  /** Native turn opened by a background-job completion outside any ACP prompt. */
+  wakeTurn?: number;
+  /** Last Core activity level sent for this session. */
+  activity?: { state: 'idle' | 'running'; backgroundTaskCount: number };
 };
 
 type HarnessModelCatalog = {
@@ -1222,17 +1234,6 @@ function assertAllowed(value: string, allowed: ReadonlySet<string>, label: strin
   }
 }
 
-/** Background completion must not open a root turn outside an ACP prompt. */
-function configureJobDelivery(rows: unknown[]): void {
-  for (const value of rows) {
-    if (!value || typeof value !== 'object') continue;
-    const row = value as { name?: string; config?: unknown };
-    if (row.name === '@deepseek-ai/dsh-tool-jobs')
-      row.config = { ...((row.config as object) ?? {}), completionDelivery: 'quiet' };
-    if (Array.isArray(row.config)) configureJobDelivery(row.config);
-  }
-}
-
 /** Register vendored YAML in the profile scope so native package resolution remains valid. */
 async function registerBundledPresets(
   ctx: HarnessContext,
@@ -1257,7 +1258,6 @@ async function registerBundledPresets(
     if (rows.length !== 1 || definition?.id !== id || !Array.isArray(definition.plugins)) {
       throw new Error(`Invalid bundled preset: ${id}`);
     }
-    configureJobDelivery(definition.plugins);
     const dispose = await registry.register(definition);
     ctx.effect(() => dispose, `acp-extension-dsh.preset.${id}`);
   }
@@ -1304,7 +1304,6 @@ async function registerBundledPresets(
             if (row.group && Array.isArray(row.config)) resolvePackages(row.config);
           }
         };
-        configureJobDelivery(plugins);
         resolvePackages(plugins);
         const scoped = profile.extend({ baseUrl: pathToFileURL(folder + '/').href });
         const dispose = await scoped.agentPresets.register({
@@ -1447,13 +1446,51 @@ export function apply(
     inflight?: InflightPrompt
   ): void => enqueueOutput(record, () => notify(notification), inflight);
 
+  /** Live root-owned jobs; each one wakes its owner when it settles. */
+  const liveJobs = new Map<string, string>();
+
+  /** Publish the Core activity level when it changed, after earlier output. */
+  const publishActivity = (record: SessionRecord): void => {
+    const sessionId = record.agent.session.id;
+    if (sessions.get(sessionId) !== record) return;
+    const state = record.agent.status === 'running' ? 'running' : 'idle';
+    let backgroundTaskCount = 0;
+    for (const owner of liveJobs.values()) if (owner === sessionId) backgroundTaskCount++;
+    const previous = record.activity ?? { state: 'idle', backgroundTaskCount: 0 };
+    if (previous.state === state && previous.backgroundTaskCount === backgroundTaskCount) return;
+    record.activity = { state, backgroundTaskCount };
+    const update: LodySessionActivityUpdate = {
+      version: 1,
+      sessionId,
+      state,
+      backgroundTaskCount,
+    };
+    enqueueOutput(record, () =>
+      conn.extNotification(
+        LODY_EXTENSION_METHODS.sessionActivityUpdate,
+        update as unknown as Record<string, unknown>
+      )
+    );
+  };
+
+  ctx.on('agent/status', ({ agent }: { agent: HarnessAgent }) => {
+    const record = ownedRecord(agent);
+    if (record) publishActivity(record);
+  });
+
   if (jobs)
     ctx.effect(() => {
       const dispose = jobs.events.subscribe({ owners: 'all' }, (event) => {
         const job = event.job;
-        if (!job?.owner || event.type === 'removed') return;
+        if (!job?.owner) return;
+        const live =
+          event.type !== 'removed' && (job.status === 'running' || job.status === 'stopping');
+        if (live) liveJobs.set(job.id, job.owner);
+        else liveJobs.delete(job.id);
         const record = sessions.get(job.owner);
         if (!record) return;
+        publishActivity(record);
+        if (event.type === 'removed') return;
         const status =
           job.status === 'running' || job.status === 'stopping'
             ? 'in_progress'
@@ -1544,7 +1581,8 @@ export function apply(
         lookup: (name) =>
           (
             agent.ctx.get('tools') as
-              { get(name: string, scope: HarnessAgent): ToolPresenter | undefined } | undefined
+              | { get(name: string, scope: HarnessAgent): ToolPresenter | undefined }
+              | undefined
           )?.get(name, agent),
         content: (block) => assistantBlockToAcp(block as HarnessMessageBlock, attachments),
         emit: async (update) => {
@@ -1638,7 +1676,8 @@ export function apply(
 
   const flushSession = async (session: HarnessSession): Promise<void> => {
     const store = ctx.get('sessions') as
-      { flush(session: HarnessSession): Promise<boolean> } | undefined;
+      | { flush(session: HarnessSession): Promise<boolean> }
+      | undefined;
     if (!store || !(await store.flush(session)))
       throw new Error('no session durability listener is available');
   };
@@ -1898,7 +1937,8 @@ export function apply(
       record.contextWindow > 0
     ) {
       const meter = ctx.get('tokenMeter') as
-        { measure(session: HarnessSession): { totalTokens: number } } | undefined;
+        | { measure(session: HarnessSession): { totalTokens: number } }
+        | undefined;
       if (meter) {
         const used = meter.measure(session).totalTokens;
         if (Number.isFinite(used) && used >= 0)
@@ -2097,12 +2137,22 @@ export function apply(
   ctx.on(
     'agent/pre-step',
     async (
-      { agent, turn }: { agent: HarnessAgent; turn: number },
+      {
+        agent,
+        turn,
+        messages: claimed,
+      }: { agent: HarnessAgent; turn: number; messages?: readonly HarnessClaimedMessage[] },
       next: () => Promise<{ kind: 'reject' } | { kind: 'enter'; messages: HarnessUserMessage[] }>
     ) => {
       const record = ownedRecord(agent);
-      if (record && (!record.inflight || record.inflight.cancelRequested))
-        return { kind: 'reject' };
+      if (record?.inflight?.cancelRequested) return { kind: 'reject' };
+      if (record && !record.inflight) {
+        // Only a background-job completion may open a root turn outside an
+        // ACP prompt; the rest of that turn stays admitted.
+        if (claimed?.some((message) => message.source?.kind === JOB_NOTICE_SOURCE))
+          record.wakeTurn = turn;
+        else if (record.wakeTurn !== turn) return { kind: 'reject' };
+      }
       const decision = await next();
       if (!record || decision.kind !== 'enter') return decision;
       const messages = decision.messages.filter((message) => {
@@ -2534,7 +2584,8 @@ export function apply(
         cwd: params.cwd,
         lookup: (name) => {
           const tools = handle.agent.ctx.get('tools') as
-            { get(name: string, scope: HarnessAgent): ToolPresenter | undefined } | undefined;
+            | { get(name: string, scope: HarnessAgent): ToolPresenter | undefined }
+            | undefined;
           return tools?.get(name, handle.agent);
         },
         content: (block) => assistantBlockToAcp(block as HarnessMessageBlock, attachments),
@@ -2676,7 +2727,8 @@ export function apply(
               }
               const defaultPreset = (
                 (document as Record<string, unknown>)['agent-presets'] as
-                  { default?: unknown } | undefined
+                  | { default?: unknown }
+                  | undefined
               )?.default;
               if (
                 defaultPreset !== undefined &&

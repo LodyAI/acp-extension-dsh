@@ -1166,6 +1166,7 @@ describe('DeepSeek Harness ACP adapter', () => {
         compaction: { version: 1 },
         usage: { version: 1 },
         sessionHistory: { version: 1 },
+        sessionActivity: { version: 1 },
         steering: {
           version: 1,
           transport: 'request',
@@ -2875,5 +2876,178 @@ describe('DeepSeek Harness ACP adapter', () => {
     markIdle?.();
 
     await expect(prompt).rejects.toThrow(/turn failed: provider failed/u);
+  });
+
+  it('lets a background-job completion wake an idle session and reports its activity level', async () => {
+    type AdapterContext = Parameters<typeof apply>[0];
+    type TestAgent = NonNullable<ReturnType<AdapterContext['agents']['get']>>;
+    type PreStep = (
+      args: {
+        agent: TestAgent;
+        turn: number;
+        messages: Array<{ id: string; source: { kind: string } }>;
+      },
+      next: () => Promise<{ kind: 'enter'; messages: unknown[] }>
+    ) => Promise<{ kind: string }>;
+
+    const streams = connectedStreams();
+    const listeners = new Map<string, Set<Listener>>();
+    const emit = (event: string, ...args: unknown[]) => {
+      for (const listener of listeners.get(event) ?? []) void listener(...args);
+    };
+    let agent: (TestAgent & { status: string }) | undefined;
+    let queuedMessage: { id: string } | undefined;
+    let markIdle!: () => void;
+    const idle = new Promise<void>((resolve) => (markIdle = resolve));
+    let jobEvents: ((event: { type: string; job?: Record<string, unknown> }) => void) | undefined;
+    const context: AdapterContext = {
+      agents: {
+        async create(options) {
+          const agentContext: Parameters<typeof options.setup>[0] = {
+            get: () => undefined,
+            on: () => () => undefined,
+            plugin: () => ({ await: () => Promise.resolve() }),
+            loader: { import: () => Promise.resolve({}), unwrapExports: (exports) => exports },
+          };
+          await options.setup(agentContext);
+          agent = {
+            id: options.sessionId,
+            ctx: agentContext,
+            status: 'idle',
+            session: {
+              id: options.sessionId,
+              header: { id: options.sessionId },
+              events: [],
+              append: vi.fn(),
+            },
+            followup(message) {
+              queuedMessage = message;
+            },
+            cancel: vi.fn(),
+            whenIdle: () => idle,
+          };
+          return { agent, dispose: () => Promise.resolve() };
+        },
+        get: (sessionId) => (agent?.id === sessionId ? agent : undefined),
+      },
+      permissionPresets: {
+        names: ['workspace-write'],
+        defaultPreset: 'workspace-write',
+        current: () => 'workspace-write',
+        optionOf: permissionOption,
+        set: vi.fn(),
+      },
+      agentPresets: {
+        defaultId: 'standard',
+        list: async () => [{ id: 'standard' }],
+        mount: async (_agentContext, id = 'standard') => ({ id }),
+        select: async (_agent, id) => id,
+      },
+      logger: { warn: vi.fn() },
+      on<TArgs extends unknown[]>(event: string, listener: (...args: TArgs) => unknown) {
+        const set = listeners.get(event) ?? new Set();
+        listeners.set(event, set);
+        set.add(listener as Listener);
+        return () => set.delete(listener as Listener);
+      },
+      get: (name) =>
+        name === 'jobs'
+          ? {
+              events: {
+                subscribe: (_filter: unknown, callback: typeof jobEvents) => {
+                  jobEvents = callback;
+                  return () => undefined;
+                },
+              },
+            }
+          : testHarnessService(name),
+      effect: (register) => {
+        disposers.push(register());
+      },
+    };
+
+    apply(context, { stream: streams.agent });
+    const activity: unknown[] = [];
+    const messages: unknown[] = [];
+    const client = new ClientSideConnection(
+      () => ({
+        requestPermission: async () => ({ outcome: { outcome: 'cancelled' as const } }),
+        sessionUpdate: async ({ update }) => {
+          if (update.sessionUpdate === 'agent_message_chunk' && update.content.type === 'text') {
+            messages.push(update.content.text);
+          }
+        },
+        extNotification: async (method, params) => {
+          if (method === '_lody/session/activity_update') {
+            activity.push({ state: params.state, backgroundTaskCount: params.backgroundTaskCount });
+          }
+        },
+      }),
+      streams.client
+    );
+    const initialized = await client.initialize({
+      protocolVersion: PROTOCOL_VERSION,
+      clientCapabilities: {},
+    });
+    expect(initialized.agentCapabilities?._meta?.lody).toMatchObject({
+      sessionActivity: { version: 1 },
+    });
+    const { sessionId } = await client.newSession({ cwd: process.cwd(), mcpServers: [] });
+    if (!agent || !jobEvents) throw new Error('missing Harness fixtures');
+    const preStep = [...(listeners.get('agent/pre-step') ?? [])][0] as unknown as PreStep;
+    const enter = () => Promise.resolve({ kind: 'enter' as const, messages: [] });
+
+    const prompt = client.prompt({ sessionId, prompt: [{ type: 'text', text: 'start job' }] });
+    await vi.waitFor(() => expect(queuedMessage).toBeDefined());
+    agent.status = 'running';
+    emit('agent/status', { agent, status: 'running' });
+    emit('agent/inbox/claimed', { agent, message: queuedMessage, turn: 1 });
+    const job = { id: 'job-1', owner: sessionId, kind: 'bash', label: 'build', startedAt: 1000 };
+    jobEvents({ type: 'registered', job: { ...job, status: 'running' } });
+    emit('session/event', agent.session, {
+      type: 'turn/end',
+      data: { turn: 1, reason: { kind: 'completed' } },
+    });
+    agent.status = 'idle';
+    emit('agent/status', { agent, status: 'idle' });
+    markIdle();
+    await expect(prompt).resolves.toEqual({ stopReason: 'end_turn' });
+    await vi.waitFor(() => expect(activity).toHaveLength(3));
+    expect(activity).toEqual([
+      { state: 'running', backgroundTaskCount: 0 },
+      { state: 'running', backgroundTaskCount: 1 },
+      { state: 'idle', backgroundTaskCount: 1 },
+    ]);
+
+    // The job settles while no ACP prompt is open; tool-jobs wakes the agent.
+    jobEvents({ type: 'settled', job: { ...job, status: 'completed', finishedAt: 2000 } });
+    agent.status = 'running';
+    emit('agent/status', { agent, status: 'running' });
+    const notice = { id: 'notice-1', source: { kind: 'tool-jobs' } };
+    await expect(preStep({ agent, turn: 2, messages: [notice] }, enter)).resolves.toMatchObject({
+      kind: 'enter',
+    });
+    await expect(preStep({ agent, turn: 2, messages: [] }, enter)).resolves.toMatchObject({
+      kind: 'enter',
+    });
+    emit('session/event', agent.session, {
+      type: 'assistant/message',
+      data: { turn: 2, message: { content: [{ type: 'text', text: 'build finished' }] } },
+    });
+    await vi.waitFor(() => expect(messages).toContain('build finished'));
+    agent.status = 'idle';
+    emit('agent/status', { agent, status: 'idle' });
+    await vi.waitFor(() => expect(activity).toHaveLength(6));
+    expect(activity.slice(3)).toEqual([
+      { state: 'idle', backgroundTaskCount: 0 },
+      { state: 'running', backgroundTaskCount: 0 },
+      { state: 'idle', backgroundTaskCount: 0 },
+    ]);
+
+    // Anything else still cannot open a root turn without an ACP prompt.
+    const user = { id: 'other', source: { kind: 'user' } };
+    await expect(preStep({ agent, turn: 3, messages: [user] }, enter)).resolves.toEqual({
+      kind: 'reject',
+    });
   });
 });

@@ -352,3 +352,146 @@ await test(
     }
   }
 );
+
+await test(
+  'a background job completion wakes an idle ACP session and reports activity',
+  { timeout: 20000 },
+  async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-wake-'));
+    const { Context } = await load('cordis');
+    const { LlmAdapter } = await load('dsh-llm');
+    const ctx = new Context();
+    const disposers = [];
+    const requests = [];
+    class Model extends LlmAdapter {
+      async resolveModel(provider, model) {
+        return { provider, id: model, name: model, contextWindow: 4096 };
+      }
+      async *stream(options) {
+        requests.push(options);
+        const text = `answer ${requests.length}`;
+        yield { type: 'block-start', index: 0, blockType: 'text' };
+        yield { type: 'text-delta', index: 0, text };
+        yield { type: 'block-end', index: 0, block: { type: 'text', text } };
+        yield { type: 'usage', usage: { inputTokens: 10, outputTokens: 3 } };
+        yield { type: 'finish', reason: { kind: 'stop' } };
+      }
+    }
+    try {
+      for (const name of [
+        'dsh-llm',
+        'dsh-session',
+        'dsh-session-projection',
+        'dsh-system-prompt',
+        'dsh-tools',
+        'dsh-agent',
+      ])
+        await ctx.plugin((await load(name)).default).await();
+      await ctx.plugin(await load('dsh-tool-executor-native')).await();
+      const persistence = await load('dsh-session-persistence-jsonl');
+      await ctx
+        .plugin(persistence.default ?? persistence, {
+          root: join(root, 'sessions'),
+          compression: 'none',
+        })
+        .await();
+      await ctx.plugin((await load('dsh-agent-loop')).default, { agents: [] }).await();
+      await ctx.plugin((await load('dsh-jobs-local')).default).await();
+      // Default (`wakeup`) delivery, as the bundled presets now load it.
+      await ctx.plugin(await load('dsh-tool-jobs')).await();
+      ctx.llm.registerAdapter(['synthetic'], new Model());
+      const incoming = new TransformStream();
+      const outgoing = new TransformStream();
+      const updates = [];
+      const activity = [];
+      let settledIdle = signal();
+      apply(
+        {
+          agents: ctx.agents,
+          agentPresets: {
+            defaultId: 'synthetic',
+            list: async () => [{ id: 'synthetic' }],
+            mount: async () => ({ id: 'synthetic' }),
+          },
+          permissionPresets: {
+            names: ['workspace-write'],
+            current: () => 'workspace-write',
+            optionOf: (value) => ({ value, name: value }),
+          },
+          get: (name) => ctx.get(name),
+          on: (...args) => ctx.on(...args),
+          effect: (register) => disposers.push(register()),
+          logger: { warn: console.error },
+        },
+        {
+          provider: 'synthetic',
+          model: 'fixture',
+          stream: { readable: incoming.readable, writable: outgoing.writable },
+        }
+      );
+      const client = new ClientSideConnection(
+        () => ({
+          sessionUpdate: async (value) => {
+            updates.push(value);
+          },
+          extNotification: async (method, value) => {
+            if (method !== '_lody/session/activity_update') return;
+            activity.push(`${value.state}:${value.backgroundTaskCount}`);
+            if (value.state === 'idle' && activity.includes('running:0'))
+              settledIdle.resolve(activity.at(-1));
+          },
+          requestPermission: async () => ({ outcome: { outcome: 'cancelled' } }),
+        }),
+        { readable: outgoing.readable, writable: incoming.writable }
+      );
+      const initialized = await client.initialize({
+        protocolVersion: PROTOCOL_VERSION,
+        clientCapabilities: {},
+      });
+      assert.deepEqual(initialized.agentCapabilities._meta.lody.sessionActivity, { version: 1 });
+      const id = (await client.newSession({ cwd: root, mcpServers: [] })).sessionId;
+      assert.equal(
+        (await client.prompt({ sessionId: id, prompt: [{ type: 'text', text: 'start' }] }))
+          .stopReason,
+        'end_turn'
+      );
+      assert.equal(await settledIdle.promise, 'idle:0');
+
+      settledIdle = signal();
+      const jobDone = signal();
+      ctx.jobs.start({
+        kind: 'bash',
+        label: 'synthetic build',
+        owner: id,
+        run(handle) {
+          handle.append('build ok');
+          return { cancel() {}, done: jobDone.promise };
+        },
+      });
+      const before = requests.length;
+      activity.length = 0;
+      updates.length = 0;
+      jobDone.resolve({ status: 'completed', exitCode: 0 });
+      // No ACP prompt is open: the completion itself must open a native turn.
+      assert.equal(await settledIdle.promise, 'idle:0');
+      assert.equal(requests.length - before, 1, 'the completion woke exactly one model turn');
+      const woken = JSON.stringify(requests.at(-1).messages);
+      assert.match(woken, /background job .* finished/u);
+      assert.match(woken, /build ok/u);
+      assert.deepEqual(activity, ['idle:1', 'idle:0', 'running:0', 'idle:0']);
+      assert.ok(
+        updates.some(
+          (x) =>
+            x.update.sessionUpdate === 'agent_message_chunk' &&
+            x.update.content.text === `answer ${requests.length}`
+        ),
+        'woken output reaches the ACP client'
+      );
+      await client.closeSession({ sessionId: id });
+    } finally {
+      for (const dispose of disposers) await dispose();
+      await ctx.fiber.dispose();
+      await rm(root, { recursive: true, force: true });
+    }
+  }
+);

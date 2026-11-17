@@ -70,8 +70,12 @@ in the host environment, never generated profiles.
 
 Core controls must retain ACP prompt ownership across goals and steering.
 History queries never activate writers. Project metadata never changes cwd or
-permissions. Force quiet job completion at preset registration; never admit
-unowned root steps. Per-run query/cancel support follows actual local ownership.
+permissions. Keep the presets' native `wakeup` job completion delivery: a
+completion on an idle session must open a turn. Admit a root step outside an ACP
+prompt only for a turn whose claimed input holds a `tool-jobs` notice, and keep
+rejecting every other unowned root step. Publish Core `sessionActivity` from
+`agent/status` and the root session's live jobs so hosts keep the process, and its
+in-memory job registry, alive while a job can still wake it. Per-run query/cancel support follows actual local ownership.
 
 Preserve valid available ACP MCP names; normalize invalid names and suffix
 collisions in Harness's process-global tool namespace.
