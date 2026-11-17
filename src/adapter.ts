@@ -14,7 +14,11 @@ import {
   createPlanModeConfigOption,
   normalizeLodyExtensionMethod,
 } from 'acp-extension-core';
-import { replaySessionHistory, restoredSelection } from './session-history.js';
+import {
+  replaySessionHistory,
+  restoredContextWindow,
+  restoredSelection,
+} from './session-history.js';
 import { ToolCallBridge, type ToolPresenter } from './tool-calls.js';
 import { HarnessUsageTracker, type HarnessTokenUsage } from './usage.js';
 import {
@@ -1930,7 +1934,13 @@ export function apply(
     }
     const record = sessions.get(session.header.id);
     if (!record || record.agent.session !== session) return;
-    if (event.type === 'request/context') record.contextWindow = event.data.contextWindow;
+    if (
+      event.type === 'request/context' &&
+      typeof event.data.contextWindow === 'number' &&
+      Number.isFinite(event.data.contextWindow) &&
+      event.data.contextWindow > 0
+    )
+      record.contextWindow = event.data.contextWindow;
     if (
       ['request/context', 'assistant/message', 'compaction/end'].includes(event.type) &&
       record.contextWindow &&
@@ -2600,6 +2610,7 @@ export function apply(
       agent: handle.agent,
       dispose,
       selection,
+      contextWindow: restoredContextWindow(restore ? restoredEvents : fork?.seed),
       permissionMode,
       permissionOptions,
       agentPreset: mountedPreset,

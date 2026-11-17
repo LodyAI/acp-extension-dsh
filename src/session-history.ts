@@ -131,3 +131,16 @@ export function restoredSelection(events: readonly ForkEvent[]) {
   }
   return pending ?? last;
 }
+
+/** Capacity of the latest logged request; a resumed process never re-emits it. */
+export function restoredContextWindow(
+  events: readonly ForkEvent[] | undefined
+): number | undefined {
+  for (let index = (events?.length ?? 0) - 1; index >= 0; index -= 1) {
+    const event = events?.[index];
+    if (event === undefined) continue;
+    const value = event.type === 'request/context' ? event.data.contextWindow : undefined;
+    if (typeof value === 'number' && Number.isFinite(value) && value > 0) return value;
+  }
+  return undefined;
+}
