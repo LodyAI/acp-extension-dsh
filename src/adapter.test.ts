@@ -308,6 +308,7 @@ describe('DeepSeek Harness ACP adapter', () => {
       },
       get: (name) => {
         if (name === 'llm') return DEFAULT_LLM_CATALOG;
+        if (name === 'tokenMeter') return { measure: () => ({ totalTokens: 4_321 }) };
         if (name === 'attachments')
           return {
             imageLimits: { mediaTypes: ['image/png'] },
@@ -409,6 +410,7 @@ describe('DeepSeek Harness ACP adapter', () => {
       flushed,
       updates,
       events,
+      listeners,
       setFlushFailure() {
         flushFailure = true;
       },
@@ -793,6 +795,39 @@ describe('DeepSeek Harness ACP adapter', () => {
     );
     expect(selectValue(resumed.configOptions, 'reasoning_effort')).toBe('low');
     expect(h.updates).toEqual([]);
+  });
+
+  it('reports context usage after a resumed process restores the logged request capacity', async () => {
+    const h = await forkHarness();
+    const request = { sessionId: 'cold-source', cwd: '/source', mcpServers: [] };
+    const source = h.stored.get(request.sessionId)!;
+    source.events.push({
+      type: 'request/context',
+      seq: source.events.length,
+      data: {
+        provider: 'deepseek-official',
+        model: 'deepseek-v4-flash',
+        contextWindow: 1_000_000,
+      },
+    });
+    await h.client.resumeSession(request);
+    const agent = h.live.get(request.sessionId)!;
+    h.updates.length = 0;
+    h.listeners.get('session/event')!(agent.session, {
+      type: 'assistant/message',
+      data: {
+        turn: 3,
+        step: 1,
+        message: { content: [{ type: 'text', text: 'resumed' }] },
+        usage: { inputTokens: 100, outputTokens: 20, cacheReadTokens: 5_000 },
+      },
+    });
+    await vi.waitFor(() => {
+      expect(h.updates).toContainEqual({
+        sessionId: request.sessionId,
+        update: { sessionUpdate: 'usage_update', used: 4_321, size: 1_000_000 },
+      });
+    });
   });
 
   it('forks cold native histories at exact Core turns, preserving prefixes and target configuration', async () => {
