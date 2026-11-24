@@ -170,6 +170,7 @@ type HarnessSessionEvent = {
   data: {
     provider?: string;
     model?: string;
+    header?: { config?: HarnessRequestConfig };
     usage?: HarnessTokenUsage;
     turn?: number | null;
     reason?: HarnessTurnEndReason;
@@ -1912,6 +1913,22 @@ export function apply(
     if (child?.agent?.session === session) {
       if (!child.live) return;
       enqueueOutput(child.record, async () => {
+        if (event.type === 'request/header') {
+          const config = event.data.header?.config;
+          if (config?.model && config.provider) {
+            const observation = {
+              modelId: `${config.provider}/${config.model}`,
+              reasoningEffort: config.reasoningEffort,
+            };
+            const previous = child.runs.get(child.nativeId)?.snapshot;
+            if (
+              previous?.modelId !== observation.modelId ||
+              ('reasoningEffort' in previous ? previous.reasoningEffort : undefined) !==
+                observation.reasoningEffort
+            )
+              await child.runs.snapshot(child.nativeId, observation);
+          }
+        }
         if (event.type.startsWith('tool/') || event.type === 'turn/end')
           await child.tools?.event(event.type, event.data);
         if (event.type === 'assistant/message')

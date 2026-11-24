@@ -16,6 +16,7 @@ committed assistant messages, live reasoning and the existing rich tool projecti
 non-local runs expose lifecycle and final summaries only. Scope-carrier identity,
 not tool titles, establishes ancestry. Child approvals keep run-scoped tool IDs on
 the root ACP connection; delegated questionnaires remain outside the root bridge.
+Each local child request header updates its run snapshot with the observed provider/model and optional reasoning effort.
 Core subagent list/output requests address the emitted run IDs and never expose
 foreign sessions. Local runs support cancellation; remote runs expose final output
 only and reject cancellation. Queries retain runs observed during this activation,
