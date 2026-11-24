@@ -57,7 +57,7 @@ all official aliases retain official usage pricing. Custom endpoints keep their
 path and must support Messages for inference plus OpenAI-compatible `/models`
 for discovery. OpenAI Chat-only routes belong under `llm-pi-ai` instead.
 
-Harness is pinned to **0.2.2-rc.1** (npm `latest` and `next` at upgrade time). Native model discovery hides routes without
+Harness is pinned to **0.2.2-rc.5** (npm `latest` and `next` at upgrade time). Native model discovery hides routes without
 credentials; the configured model remains selectable even when unlisted. The ACP profile
 reads `llm-deepseek`, `llm-pi-ai`, and `agent-presets.default` from
 `$DSH_HOME/settings.yaml`, falling back to `~/.dsh/settings.yaml`. Model sections
@@ -356,7 +356,7 @@ are not part of these tests.
 
 ## Core controls
 
-The generated Harness 0.2.2-rc.1 profile (v21) exposes Core sessionHistory,
+The generated Harness 0.2.2-rc.5 profile (v21) exposes Core sessionHistory,
 sessionActivity, steering, subagents, goal, tasks.background and worktreeProject in addition to
 forkAtTurn, subagentEvents, sessionTitle, compaction and cumulative usage.
 Goal, task and project declarations require their backing service/configuration.

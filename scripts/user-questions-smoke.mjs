@@ -17,7 +17,7 @@ const { createScope } = await load('@deepseek-ai/dsh-scope');
 const { default: SessionStore, SessionId } = await load('@deepseek-ai/dsh-session');
 const { UserQuestionService } = await load('@deepseek-ai/dsh-user-questions');
 const askTool = await load('@deepseek-ai/dsh-tool-ask-user');
-assert.equal(requireRuntime('@deepseek-ai/dsh-user-questions/package.json').version, '0.2.2-rc.1');
+assert.equal(requireRuntime('@deepseek-ai/dsh-user-questions/package.json').version, '0.2.2-rc.5');
 
 await test('native Harness tool → scoped waterfall → ACP → native answers and ownership failures', async () => {
   const ctx = new Context();
@@ -175,11 +175,14 @@ await test('native Harness tool → scoped waterfall → ACP → native answers 
       questions,
     });
     assert.equal(requests[1].sessionId, second.sessionId);
-    roots.delete(agent);
+    const ordinarySession = agent.session;
+    agent.session = ctx.sessions.create(SessionId('synthetic-delegated-caller'), {
+      meta: { origin: 'subagent' },
+    });
     await assert.rejects(ctx.userQuestions.ask({ agent, questions }), {
       code: 'DELEGATED_CALLER',
     });
-    roots.add(agent);
+    agent.session = ordinarySession;
     await assert.rejects(ctx.userQuestions.ask({ agent: { ...agent }, questions }), {
       code: 'CALLER_NOT_LIVE',
     });

@@ -1582,8 +1582,7 @@ export function apply(
         lookup: (name) =>
           (
             agent.ctx.get('tools') as
-              | { get(name: string, scope: HarnessAgent): ToolPresenter | undefined }
-              | undefined
+              { get(name: string, scope: HarnessAgent): ToolPresenter | undefined } | undefined
           )?.get(name, agent),
         content: (block) => assistantBlockToAcp(block as HarnessMessageBlock, attachments),
         emit: async (update) => {
@@ -1677,8 +1676,7 @@ export function apply(
 
   const flushSession = async (session: HarnessSession): Promise<void> => {
     const store = ctx.get('sessions') as
-      | { flush(session: HarnessSession): Promise<boolean> }
-      | undefined;
+      { flush(session: HarnessSession): Promise<boolean> } | undefined;
     if (!store || !(await store.flush(session)))
       throw new Error('no session durability listener is available');
   };
@@ -1954,8 +1952,7 @@ export function apply(
       record.contextWindow > 0
     ) {
       const meter = ctx.get('tokenMeter') as
-        | { measure(session: HarnessSession): { totalTokens: number } }
-        | undefined;
+        { measure(session: HarnessSession): { totalTokens: number } } | undefined;
       if (meter) {
         const used = meter.measure(session).totalTokens;
         if (Number.isFinite(used) && used >= 0)
@@ -2601,8 +2598,7 @@ export function apply(
         cwd: params.cwd,
         lookup: (name) => {
           const tools = handle.agent.ctx.get('tools') as
-            | { get(name: string, scope: HarnessAgent): ToolPresenter | undefined }
-            | undefined;
+            { get(name: string, scope: HarnessAgent): ToolPresenter | undefined } | undefined;
           return tools?.get(name, handle.agent);
         },
         content: (block) => assistantBlockToAcp(block as HarnessMessageBlock, attachments),
@@ -2744,8 +2740,7 @@ export function apply(
               }
               const defaultPreset = (
                 (document as Record<string, unknown>)['agent-presets'] as
-                  | { default?: unknown }
-                  | undefined
+                  { default?: unknown } | undefined
               )?.default;
               if (
                 defaultPreset !== undefined &&
