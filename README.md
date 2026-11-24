@@ -20,7 +20,7 @@ Each local child request header updates its run snapshot with the observed provi
 Core subagent list/output requests address the emitted run IDs and never expose
 foreign sessions. Local runs support cancellation; remote runs expose final output
 only and reject cancellation. Queries retain runs observed during this activation,
-not a reconstructed historical roster. Core 0.1.9 supplies the shared contracts.
+not a reconstructed historical roster. Core 0.4.0 supplies the shared contracts.
 
 The adapter advertises Core's `_meta.lody.compaction` capability and translates
 Harness `compaction/start` and `compaction/end` events into a standard ACP tool
@@ -134,7 +134,7 @@ new `deepseek-flash` price. Unknown models/custom endpoints have no estimated co
 These are list-price estimates, not invoices; cross-boundary requests can differ.
 Only the registered `deepseek-official` route at the official endpoint is priced;
 an arbitrary provider named `deepseek` is not evidence of official billing.
-The adapter consumes the published Core 0.1.9 contract.
+The adapter consumes the published Core 0.4.0 contract.
 
 ## Exports
 
