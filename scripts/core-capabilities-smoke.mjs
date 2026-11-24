@@ -22,7 +22,7 @@ const signal = () => {
 };
 
 await test('projects tool results built by the pinned native message constructor', async () => {
-  assert.equal(requireRuntime('@deepseek-ai/dsh-llm/package.json').version, '0.2.2-rc.1');
+  assert.equal(requireRuntime('@deepseek-ai/dsh-llm/package.json').version, '0.2.2-rc.5');
   const { createToolResultMessage } = await load('dsh-llm');
   const updates = [];
   const bridge = new ToolCallBridge({

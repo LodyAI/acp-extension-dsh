@@ -19,7 +19,7 @@ import {
 } from './capabilities.js';
 
 export const ACP_EXTENSION_DSH_VERSION = '0.2.0';
-export const DEEPSEEK_HARNESS_VERSION = '0.2.2-rc.1';
+export const DEEPSEEK_HARNESS_VERSION = '0.2.2-rc.5';
 export const DEEPSEEK_HARNESS_PI_AI_VERSION = '1.3.0';
 export const DEEPSEEK_HARNESS_SCHEMASTERY_VERSION = '3.19.0';
 export const ACP_EXTENSION_DSH_PROFILE_REVISION = 'v21';
@@ -48,6 +48,20 @@ export const ACP_EXTENSION_DSH_CAPABILITY_SOURCE_VERSION = `acp-extension-dsh@${
  */
 export const DEEPSEEK_HARNESS_NPX_PACKAGES = [
   '@deepseek-ai/dsh',
+  '@deepseek-ai/dsh-agent-team',
+  '@deepseek-ai/dsh-client-ui-account-notifications',
+  '@deepseek-ai/dsh-client-ui-agent-team',
+  '@deepseek-ai/dsh-computer-use',
+  '@deepseek-ai/dsh-cua',
+  '@deepseek-ai/dsh-cua-bundle',
+  '@deepseek-ai/dsh-deepseek-chat-import',
+  '@deepseek-ai/dsh-error',
+  '@deepseek-ai/dsh-mcp-manager',
+  '@deepseek-ai/dsh-office-kit',
+  '@deepseek-ai/dsh-terminal-panel',
+  '@deepseek-ai/dsh-tool-agent-team',
+  '@deepseek-ai/dsh-tool-office',
+  '@deepseek-ai/dsh-util-ripgrep',
   '@deepseek-ai/cordis',
   '@deepseek-ai/cordis-plugin-group',
   '@deepseek-ai/cordis-plugin-include',
@@ -65,7 +79,6 @@ export const DEEPSEEK_HARNESS_NPX_PACKAGES = [
   '@deepseek-ai/dsh-agent-preset-registry',
   '@deepseek-ai/dsh-agent-tool-presentation',
   '@deepseek-ai/dsh-anonymous-user-id',
-  '@deepseek-ai/dsh-api-account-controller',
   '@deepseek-ai/dsh-api-gateway',
   '@deepseek-ai/dsh-api-job-controller',
   '@deepseek-ai/dsh-api-remote-access',
@@ -172,16 +185,12 @@ export const DEEPSEEK_HARNESS_NPX_PACKAGES = [
   '@deepseek-ai/dsh-credentials',
   '@deepseek-ai/dsh-credentials-local',
   '@deepseek-ai/dsh-deepseek-account',
-  '@deepseek-ai/dsh-deepseek-account-platform',
   '@deepseek-ai/dsh-deepseek-llm-api-extensions',
   '@deepseek-ai/dsh-deliverable-file-references',
   '@deepseek-ai/dsh-deque',
-  '@deepseek-ai/dsh-experimental-agent-team',
-  '@deepseek-ai/dsh-experimental-agent-team-profile',
   '@deepseek-ai/dsh-experimental-api-speech-to-text',
   '@deepseek-ai/dsh-experimental-auto-review',
   '@deepseek-ai/dsh-experimental-badge-skill-bundle',
-  '@deepseek-ai/dsh-experimental-client-ui-agent-team',
   '@deepseek-ai/dsh-experimental-client-ui-cot-translation',
   '@deepseek-ai/dsh-experimental-client-ui-forge',
   '@deepseek-ai/dsh-experimental-client-ui-stats',
@@ -203,7 +212,6 @@ export const DEEPSEEK_HARNESS_NPX_PACKAGES = [
   '@deepseek-ai/dsh-experimental-speech-to-text',
   '@deepseek-ai/dsh-experimental-speech-to-text-sensevoice',
   '@deepseek-ai/dsh-experimental-terminal-bundle',
-  '@deepseek-ai/dsh-experimental-tool-agent-team',
   '@deepseek-ai/dsh-experimental-tool-worktree',
   '@deepseek-ai/dsh-experimental-translator',
   '@deepseek-ai/dsh-experimental-voice-input-bundle',
@@ -249,7 +257,6 @@ export const DEEPSEEK_HARNESS_NPX_PACKAGES = [
   '@deepseek-ai/dsh-message-feedback',
   '@deepseek-ai/dsh-message-quotes',
   '@deepseek-ai/dsh-native-command',
-  '@deepseek-ai/dsh-office-to-pdf',
   '@deepseek-ai/dsh-official-bundles',
   '@deepseek-ai/dsh-otel',
   '@deepseek-ai/dsh-output-retention',

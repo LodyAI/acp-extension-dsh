@@ -67,7 +67,7 @@ describe('DeepSeek Harness profile', () => {
   );
 
   it('pins the launcher, base bundle, and same-release package closure', () => {
-    expect(DEEPSEEK_HARNESS_VERSION).toBe('0.2.2-rc.1');
+    expect(DEEPSEEK_HARNESS_VERSION).toBe('0.2.2-rc.5');
     expect(DEEPSEEK_HARNESS_PROFILE_NAME).toBe('lody-acp');
     expect(DEEPSEEK_HARNESS_PROFILE_BUNDLES).toEqual(['@deepseek-ai/dsh-base']);
     expect(new Set(DEEPSEEK_HARNESS_NPX_PACKAGES).size).toBe(DEEPSEEK_HARNESS_NPX_PACKAGES.length);
