@@ -2092,6 +2092,10 @@ describe('DeepSeek Harness ACP adapter', () => {
       }
     );
     const child = h.spawnChild('child', 'native-one');
+    h.sessionEvent(child.session, {
+      type: 'request/header',
+      data: { header: { config: { provider: 'worker', model: 'small', reasoningEffort: 'low' } } },
+    });
     h.streamEvent({
       agent: child,
       frame: { type: 'chunk', chunk: { type: 'reasoning-delta', text: 'Thinking' } },
@@ -2113,7 +2117,11 @@ describe('DeepSeek Harness ACP adapter', () => {
       data: { message: { content: [{ type: 'text', text: 'late' }] } },
     });
     await done.promise;
+    expect(events.at(-1)).toMatchObject({
+      snapshot: { modelId: 'worker/small', reasoningEffort: 'low' },
+    });
     expect(events.map((event) => event.type)).toEqual([
+      'snapshot',
       'snapshot',
       'output',
       'output',
@@ -2124,14 +2132,14 @@ describe('DeepSeek Harness ACP adapter', () => {
       sessionId: h.session.sessionId,
       snapshot: { parentRunId: null, support: { stream: ['text', 'thought', 'tool'] } },
     });
-    expect(events[3]).toMatchObject({ snapshot: { parentRunId: events[0].runId } });
+    expect(events[4]).toMatchObject({ snapshot: { parentRunId: events[0].runId } });
     const roster = await h.client.extMethod('_lody/subagents/list', {
       sessionId: h.session.sessionId,
     });
     expect(roster.tasks).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ taskId: events[0].runId, status: 'completed' }),
-        expect.objectContaining({ taskId: events[3].runId, status: 'running' }),
+        expect.objectContaining({ taskId: events[4].runId, status: 'running' }),
       ])
     );
     expect((roster.tasks as unknown[]).length).toBe(2);
@@ -2152,14 +2160,14 @@ describe('DeepSeek Harness ACP adapter', () => {
         sessionId: h.session.sessionId,
         activeOnly: true,
       })
-    ).toEqual({ tasks: [expect.objectContaining({ taskId: events[3].runId })] });
+    ).toEqual({ tasks: [expect.objectContaining({ taskId: events[4].runId })] });
 
     expect(updates.filter((value) => value.update.sessionUpdate === 'agent_message_chunk')).toEqual(
       []
     );
     await h.client.extMethod('_lody/subagents/cancel', {
       sessionId: h.session.sessionId,
-      taskId: events[3].runId,
+      taskId: events[4].runId,
     });
     expect(
       await h.client.extMethod('_lody/subagents/list', {
@@ -2171,7 +2179,7 @@ describe('DeepSeek Harness ACP adapter', () => {
       (await h.client.extMethod('_lody/subagents/list', { sessionId: h.session.sessionId })).tasks
     ).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ taskId: events[3].runId, status: 'killed' }),
+        expect.objectContaining({ taskId: events[4].runId, status: 'killed' }),
       ])
     );
     h.spawnChild('reused', 'first-activation');
